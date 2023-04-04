@@ -1,0 +1,942 @@
+---
+title: "2_Deconvolution"
+author: "Joel Moffet"
+date: "2023-03-21"
+output: html_document
+---
+
+```{r - Cell State Deconvolution}
+library(SpatialDecon)
+library(ComplexHeatmap)
+library(circlize)
+library(scran)
+library(stringr)
+library(ggplot2)
+library(ggpubr)
+library(corrplot)
+library(speckle)
+
+nuc_spe <- readRDS('out/nuc_spe.RDS')
+com_spe <- readRDS('out/com_spe.RDS')
+
+combined_spatdat <- readRDS('data/Combined_SpatialData.RDS')
+nuc_spatdat <- combined_spatdat[combined_spatdat$ID %in% colnames(nuc_spe),]
+
+Couturier <- readRDS('data/Couturier_dataset_tumor.RDS')     #Couturier et al. dataset with unassigned nuclei removed
+
+cout_sub <- logNormCounts(Couturier[,Couturier$cluster != 'Unassigned'])
+rownames(cout_sub) <- rowData(cout_sub)$Symbol
+colnames(cout_sub) <- cout_sub$sb
+cout_mgv <- modelGeneVar(cout_sub)
+cout_hvg <- getTopHVGs(cout_mgv)
+cout_sub <- cout_sub[cout_hvg[1:5000],]
+
+cout_annots <- data.frame(celltype = cout_sub$cluster, cellname = colnames(cout_sub))
+
+profile_cout <- create_profile_matrix(mtx = counts(cout_sub),            # cell x gene count matrix
+                                    cellAnnots = cout_annots,  # cell annotations with cell type and cell name as columns 
+                                    cellTypeCol = "celltype",  # column containing cell type
+                                    cellNameCol = "cellname",           # column containing cell ID/name
+                                    matrixName = "cout_profile_matrix", # name of final profile matrix
+                                    outDir = NULL,                    # path to desired output directory, set to NULL if matrix should not be written
+                                    normalize = TRUE,                # Should data be normalized? 
+                                    minCellNum = 5,                   # minimum number of cells of one type needed to create profile, exclusive
+                                    minGenes = 10,                    # minimum number of genes expressed in a cell, exclusive
+                                    scalingFactor = 1,                # what should all values be multiplied by for final matrix
+                                    discardCellTypes = TRUE)          # should cell types be filtered for types like mitotic, doublet, low quality, unknown, etc.
+
+head(profile_cout)
+saveRDS(profile_cout, 'out/profile_cout.RDS')
+
+
+batched_counts <- assay(nuc_spe, 'Limma')
+rawbatch <- counts(nuc_spe)
+
+batch.observation.mean.neg <-  batched_counts["NegProbe-WTX", ]
+batched_bg = sweep(batched_counts * 0, 2, batch.observation.mean.neg, "+")
+dim(batched_bg)
+
+
+
+cout_nuc_res = spatialdecon(norm = batched_counts,
+                             raw = rawbatch,
+                             bg = batched_bg,
+                             X = profile_cout,
+                             cell_counts = nuc_spe$AOINucleiCount)
+str(cout_nuc_res)
+colnames(cout_nuc_res$prop_of_all) <- nuc_spe$ID_simple
+saveRDS(cout_nuc_res, 'out/cout_nuc_res.RDS')
+
+top_ha <- HeatmapAnnotation(Couturier_deconvolution = anno_barplot(t(cout_nuc_res$prop_of_all), 
+                                                                   height = unit(100, 'points'), 
+                                                                   gp = gpar(fill = c('Oligo' = '#A3F2D2',
+                                                                                      'Progenitor' = '#FEFEA6',
+                                                                                      'Neuronal' = '#CCA7FB', 
+                                                                                      'Mesenchymal' = '#F36A6A',
+                                                                                      'Astro' ='#83BCF3')),
+                                                                   border = FALSE, bar_width = 1)[nuc_spe$ROI_Type !='CD45'])
+
+
+
+column_ha <- HeatmapAnnotation(Sample = nuc_spe$ID_Sample[nuc_spe$ROI_Type !='CD45'],
+                               Classification = nuc_spe$Classification[nuc_spe$ROI_Type !='CD45'],
+                               'Ivy GAP' = nuc_spe$IVYGAP[nuc_spe$ROI_Type !='CD45'],
+                               Ki67 = nuc_spe$Ki67[nuc_spe$ROI_Type != 'CD45'],
+                               Infiltration = nuc_spe$Infiltration[nuc_spe$ROI_Type !='CD45'],
+                               'Tumour Phase' = nuc_spe$Phase[nuc_spe$ROI_Type !='CD45'],
+                               'Tumour Hypoxia' = nuc_spe$log2Hypoxia[nuc_spe$ROI_Type !='CD45'],
+                               'Nuclei Count' = anno_barplot(nuc_spe$AOINucleiCount[nuc_spe$ROI_Type !='CD45'],
+                                                             gp = gpar(fill = c('#3AC640'), bar_width = 0.9)),
+                               'Library Size' = anno_barplot(nuc_spe$lib_size[nuc_spe$ROI_Type !='CD45'],
+                                                             gp = gpar(fill = c('#3AC640'), bar_width = 0.9)),
+                               col = list(Sample = c("A_2"='#78BC4A', "GBM_2"='#A581F8',
+                                                     "GBM_3"='#841CD1', "A_1"='#1CD150',
+                                                     "GBM_1"='#DF38DC', 'A_3' = '#069649'),
+                                          Classification = c('Normal' = '#4AED25', 'Border' = '#FA9C44', 'Ki67- Border' = '#FEFB40', 'Tumour' = '#023975'),
+                                          'Ivy GAP' = c('Cellular Tumour' = '#0D1089', 'Cellular Tumour + Microvascular Proliferation' = '#0C34D5', 
+                                                        'Infiltrating Tumour' = '#6180D8', 'Necrosis' = '#6B0917', 'Perinecrotic Zone' = '#A82134',
+                                                        'Pseudo-palisading cells Around the Necrosis' = '#954F59', 'Tumour Leading Edge' = '#B88709'),
+                                          Ki67 = c('non' = 'grey', 'negative' = 'blue', 'positive' = 'red'),
+                                          Infiltration = c('High' = '#EAACB5', 'Low' = '#ACE9EA'),
+                                          'Tumour Phase' = c('S' = 'green', 'G2M' = 'blue', 'G1' = 'red'),
+                                          'Tumour Hypoxia' = colorRamp2(c(465, 520), c( "white", "#0C7D10"))))               #450 to 565 to match across heatmaps
+
+
+lgd_list <- list(tumour_lgd = Legend(labels = rev(rownames(cout_nuc_res$prop_of_all)), title = "Cell State Deconvolution", legend_gp = gpar(fill = rev(c('Oligo' = '#A3F2D2',
+                                                                                                                                                         'Progenitor' = '#FEFEA6',
+                                                                                                                                                         'Neuronal' = '#CCA7FB',
+                                                                                                                                                         'Mesenchymal' = '#F36A6A',
+                                                                                                                                                         'Astro' ='#83BCF3')))),
+                 nuclei_lgd = Legend(labels = c('Immune', 'Tumour'), title = "Nuclei Count", legend_gp = gpar(fill = c('Immune' = '#F8F241', 'Tumour' ='#3AC640'))))
+
+
+genes <- c('TP53','EGFR','OLIG1','HLA-C','DIP2C','PDPN', 'PDGFRA', 'COL8A1', 'NF1', 'CDKN2A', 'HDAC1', 'RBP1', 'PDGFA')
+gene_split <-  c('DEG', 'GOI', 'DEG', 'DEG', 'DEG', 'DEG', 'GOI', 'DEG', 'GOI', 'GOI', 'GOI', 'DEG', 'DEG')
+genemap <- assay(nuc_spe, 'logLimma')
+colnames(genemap) <- nuc_spe$ID_simple
+genemap <- genemap[genes,nuc_spe$ROI_Type !='CD45']
+
+
+pdf(file  = 'out_figures/tumour_decon_with_annotations.pdf', height = 7, width = 15)
+
+draw(Heatmap(t(scale(t(genemap),
+                     scale = TRUE)), show_heatmap_legend = F, show_row_dend = T, show_row_names = T, 
+             column_split = nuc_spe$class[nuc_spe$ROI_Type !='CD45'], row_split = gene_split, row_names_gp = gpar(fontsize =9),
+             bottom_annotation = column_ha, top_annotation = top_ha), annotation_legend_list = lgd_list)
+
+dev.off()
+
+
+
+draw(Heatmap(t(scale(t(genemap),
+                     scale = TRUE)), show_heatmap_legend = F, show_row_dend = T, show_row_names = T, 
+             column_split = nuc_spe$class[nuc_spe$ROI_Type !='CD45'], row_split = gene_split, row_names_gp = gpar(fontsize =9),
+             bottom_annotation = column_ha, top_annotation = top_ha), annotation_legend_list = lgd_list)
+
+
+```
+
+```{r}
+
+
+batched_counts <- assay(com_spe, 'Limma')
+rawbatch <- counts(com_spe)
+
+
+
+
+batch.observation.mean.neg <-  batched_counts["NegProbe-WTX", ]
+batched_bg = sweep(batched_counts * 0, 2, batch.observation.mean.neg, "+")
+dim(batched_bg)
+
+cout_com_res = spatialdecon(norm = batched_counts,
+                             raw = rawbatch,
+                             bg = batched_bg,
+                             X = profile_cout,
+                             cell_counts = com_spe$AOINucleiCount)
+str(cout_com_res)
+colnames(cout_com_res$prop_of_all) <- com_spe$ID_simple
+saveRDS(cout_com_res, 'out/cout_com_res.RDS')
+
+colnames(cout_com_res$prop_of_all) <- com_spe$ID_simple
+
+
+cout_com_tumour_samples <- cout_com_res$prop_of_all[,!str_detect(com_spe$ID_simple, 'I')]
+
+cout_com_tumour_samples <- cbind(rowMeans(cout_com_tumour_samples[,str_detect(colnames(cout_com_tumour_samples), 'A_1')]),
+                                 rowMeans(cout_com_tumour_samples[,str_detect(colnames(cout_com_tumour_samples), 'A_2')]),
+                                 rowMeans(cout_com_tumour_samples[,str_detect(colnames(cout_com_tumour_samples), 'A_3')]),
+                                 rowMeans(cout_com_tumour_samples[,str_detect(colnames(cout_com_tumour_samples), 'GBM_1')]),
+                                 rowMeans(cout_com_tumour_samples[,str_detect(colnames(cout_com_tumour_samples), 'GBM_2')]),
+                                 rowMeans(cout_com_tumour_samples[,str_detect(colnames(cout_com_tumour_samples), 'GBM_3')]))
+
+colnames(cout_com_tumour_samples) <- c('A_1', 'A_2', 'A_3', 'GBM_1', 'GBM_2', 'GBM_3')
+
+
+
+sample_ha <- HeatmapAnnotation('Average Cell State\nDeconvolution Per\nSample' = anno_barplot(t(cout_com_tumour_samples),
+                                                                                              height = unit(500, 'pt'),
+                                                                                              gp = gpar(fill = c('Oligo' = '#A3F2D2',
+                                                                                                                 'Progenitor' = '#FEFEA6',
+                                                                                                                 'Neuronal' = '#CCA7FB',
+                                                                                                                 'Mesenchymal' = '#F36A6A',
+                                                                                                                 'Astro' ='#83BCF3')),
+                                                                                              border = FALSE, bar_width = 0.9),simple_anno_size = unit(1, "cm"))
+
+
+pdf(file  = 'out_figures/tumour_decon_combined_sample_average.pdf', height = 10, width = 10)
+
+
+draw(Heatmap(t(scale(t(cout_com_tumour_samples),scale = TRUE)), 
+             rect_gp = gpar(type = "none"), show_row_names = F, 
+             show_row_dend = F, show_heatmap_legend = F, 
+             top_annotation = sample_ha, cluster_columns = F),
+     heatmap_height = unit(550, 'pt'))
+
+dev.off()
+
+draw(Heatmap(t(scale(t(cout_com_tumour_samples),scale = TRUE)), 
+             rect_gp = gpar(type = "none"), show_row_names = F, 
+             show_row_dend = F, show_heatmap_legend = F, 
+             top_annotation = sample_ha, cluster_columns = F),
+     heatmap_height = unit(550, 'pt'))
+
+
+
+
+
+pdf(file  = 'out_figures/cell_state_pie.pdf', height = 25, width = 25)
+
+
+par(mfrow=c(5,7))
+for(i in sort(colnames(com_spe[,str_detect(colnames(com_spe), 'T')]))){pie(cout_com_res$prop_of_all[,i], labels = NA, col = c('#A3F2D2','#FEFEA6','#CCA7FB','#F36A6A','#83BCF3'), main = i)}
+
+dev.off()
+
+
+
+
+```
+
+
+```{r}
+# CT Ki67
+
+cout_nuc_CT_samples <- cout_nuc_res$prop_of_all[,str_detect(nuc_spe$IVYGAP, 'Cellular Tumour')]
+cout_nuc_CT_samples_K <- cout_nuc_CT_samples[,str_detect(colnames(cout_nuc_CT_samples), 'K')]
+cout_nuc_CT_samples_T <- cout_nuc_CT_samples[,gsub('K', 'T',colnames(cout_nuc_CT_samples_K))]
+
+cout_nuc_CT_samples_K <- cbind(rowMeans(cout_nuc_CT_samples_K[,str_detect(colnames(cout_nuc_CT_samples_K), 'A_1')]),
+                                 cout_nuc_CT_samples_K[,str_detect(colnames(cout_nuc_CT_samples_K), 'A_2')],
+                                 rowMeans(cout_nuc_CT_samples_K[,str_detect(colnames(cout_nuc_CT_samples_K), 'GBM_1')]),
+                                 rowMeans(cout_nuc_CT_samples_K[,str_detect(colnames(cout_nuc_CT_samples_K), 'GBM_2')]))
+
+cout_nuc_CT_samples_T <- cbind(rowMeans(cout_nuc_CT_samples_T[,str_detect(colnames(cout_nuc_CT_samples_T), 'A_1')]),
+                               cout_nuc_CT_samples_T[,str_detect(colnames(cout_nuc_CT_samples_T), 'A_2')],
+                               rowMeans(cout_nuc_CT_samples_T[,str_detect(colnames(cout_nuc_CT_samples_T), 'GBM_1')]),
+                               rowMeans(cout_nuc_CT_samples_T[,str_detect(colnames(cout_nuc_CT_samples_T), 'GBM_2')]))
+
+colnames(cout_nuc_CT_samples_T) <- c('A_1', 'A_2', 'GBM_1', 'GBM_2')
+colnames(cout_nuc_CT_samples_K) <- c('A_1', 'A_2', 'GBM_1', 'GBM_2')
+
+sample_ha_K <- HeatmapAnnotation('Average Cell State\nDeconvolution Per\nSample' = anno_barplot(t(cout_nuc_CT_samples_K),
+                                                                                              height = unit(500, 'pt'),
+                                                                                              gp = gpar(fill = c('Oligo' = '#A3F2D2',
+                                                                                                                 'Progenitor' = '#FEFEA6',
+                                                                                                                 'Neuronal' = '#CCA7FB',
+                                                                                                                 'Mesenchymal' = '#F36A6A',
+                                                                                                                 'Astro' ='#83BCF3')),
+                                                                                              border = FALSE, bar_width = 0.9, axis_param = list(labels = NULL)),simple_anno_size = unit(1, "cm"),
+                                 '\n # Samples' = anno_text(c('\n2','\n1','\n3','\n2'), which = 'column', rot = 0, show_name = T))
+
+
+sample_ha_T <- HeatmapAnnotation('Average Cell State\nDeconvolution Per\nSample' = anno_barplot(t(cout_nuc_CT_samples_T),
+                                                                                              height = unit(500, 'pt'),
+                                                                                              gp = gpar(fill = c('Oligo' = '#A3F2D2',
+                                                                                                                 'Progenitor' = '#FEFEA6',
+                                                                                                                 'Neuronal' = '#CCA7FB',
+                                                                                                                 'Mesenchymal' = '#F36A6A',
+                                                                                                                 'Astro' ='#83BCF3')),
+                                                                                              border = FALSE, bar_width = 0.9),simple_anno_size = unit(1, "cm"),
+                                 '# Samples' = anno_text(c('\n2','\n1','\n3','\n2'),which = 'column', rot =0,), show_annotation_name = FALSE)
+
+
+
+pdf(file  = 'out_figures/tumour_decon_sample_average_Ki67.pdf', height = 10, width = 15)
+
+draw(Heatmap(t(scale(t(cout_nuc_CT_samples_T),scale = TRUE)), 
+             rect_gp = gpar(type = "none"), show_row_names = F, 
+             show_row_dend = F, show_heatmap_legend = F, 
+             top_annotation = sample_ha_T, cluster_columns = F,
+             column_title = 'CT Ki67-') +
+     Heatmap(t(scale(t(cout_nuc_CT_samples_K),scale = TRUE)), 
+              rect_gp = gpar(type = "none"), show_row_names = F, 
+              show_row_dend = F, show_heatmap_legend = F, 
+              top_annotation = sample_ha_K, cluster_columns = F,
+             column_title = 'CT Ki67+'),
+     heatmap_height = unit(620, 'pt'), ht_gap = unit(25,'pt'))
+
+dev.off()
+
+
+draw(Heatmap(t(scale(t(cout_nuc_CT_samples_T),scale = TRUE)), 
+             rect_gp = gpar(type = "none"), show_row_names = F, 
+             show_row_dend = F, show_heatmap_legend = F, 
+             top_annotation = sample_ha_T, cluster_columns = F,
+             column_title = 'CT Ki67-') +
+     Heatmap(t(scale(t(cout_nuc_CT_samples_K),scale = TRUE)), 
+              rect_gp = gpar(type = "none"), show_row_names = F, 
+              show_row_dend = F, show_heatmap_legend = F, 
+              top_annotation = sample_ha_K, cluster_columns = F,
+             column_title = 'CT Ki67+'),
+     heatmap_height = unit(620, 'pt'), ht_gap = unit(25,'pt'))
+
+
+
+```
+
+
+```{r}
+pdf(file  = 'out_figures/tumour_decon_heatmap_signature.pdf', height = 10, width = 12)
+
+draw(Heatmap(sweep(profile_cout, 1, apply(profile_cout, 1, max), "/"), show_row_names = F, name = 'Scaled Gene Expression',row_dend_width = unit(4, 'cm')))
+
+dev.off()
+
+draw(Heatmap(sweep(profile_cout, 1, apply(profile_cout, 1, max), "/"), show_row_names = F, name = 'Scaled Gene Expression',row_dend_width = unit(4, 'cm')))
+
+
+
+profile_cout_scaled <- t(scale(t(profile_cout), scale =T))
+Cout_Genesets <- list()
+for(i in colnames(profile_cout_scaled)){Cout_Genesets[[i]] <- names(sort(profile_cout_scaled[rownames(profile_cout_scaled) %in% rownames(nuc_spe),i], decreasing = T)[1:50])}
+
+
+genes <- Cout_Genesets$Progenitor
+genemap <- assay(nuc_spe, 'logLimma')[genes,nuc_spe$ROI_Type !='CD45']
+colnames(genemap) <- nuc_spe$ID_simple[nuc_spe$ROI_Type !='CD45']
+
+pdf(file  = 'out_figures/progenitor_signature_heatmap.pdf', height = 10, width = 15)
+
+draw(Heatmap(t(scale(t(genemap),
+                     scale = TRUE)), show_heatmap_legend = F, row_names_gp = gpar(fontsize =8),
+             column_split = nuc_spe$class[nuc_spe$ROI_Type !='CD45'],bottom_annotation = column_ha, top_annotation = top_ha), annotation_legend_list = lgd_list)
+
+dev.off()
+
+draw(Heatmap(t(scale(t(genemap),
+                     scale = TRUE)), show_heatmap_legend = F, row_names_gp = gpar(fontsize =8),
+             column_split = nuc_spe$class[nuc_spe$ROI_Type !='CD45'],bottom_annotation = column_ha, top_annotation = top_ha), annotation_legend_list = lgd_list)
+
+
+```
+
+
+
+
+----------------
+
+
+
+
+
+
+
+```{r - Immune deconvolution}
+sdm <-  readRDS('data/sce_downsampled_malignant.rds')
+sdm@assays@data@listData$logcounts <- as(sdm@assays@data@listData$logcounts, 'CsparseMatrix')
+rowData(sdm)$Ensembl <- rownames(sdm)
+rownames(sdm) <- rowData(sdm)$feature_name
+
+
+sdi <-  readRDS('data/sce_downsampled_immune.rds')
+sdi@assays@data@listData$logcounts <- as(sdi@assays@data@listData$logcounts, 'CsparseMatrix')
+rowData(sdi)$Ensembl <- rownames(sdi)
+rownames(sdi) <- rowData(sdi)$feature_name
+assay(sdi, 'est_counts') <- logcounts(sdi)
+assay(sdi, 'est_counts')@x <- 2^assay(sdi, 'est_counts')@x-1
+sdi$celltype_original[is.na(sdi$celltype_original)] <- 'unknown'
+sdi$combine <- str_to_title(as.character(sdi$cell_type))
+sdi$combine[str_detect(sdi$celltype_original, regex('reg', ignore_case = T))][sdi$combine[str_detect(sdi$celltype_original, regex('reg', ignore_case = T))]=='Mature T Cell'] <- 'Treg'
+sdi$combine[str_detect(sdi$celltype_original, regex('CD4', ignore_case = T))][sdi$combine[str_detect(sdi$celltype_original, regex('CD4', ignore_case = T))]=='Mature T Cell'] <- 'CD4 T Cell'
+sdi$combine[str_detect(sdi$celltype_original, regex('CD8', ignore_case = T))][sdi$combine[str_detect(sdi$celltype_original, regex('CD8', ignore_case = T))]=='Mature T Cell'] <- 'CD8 T Cell'
+sdi$combine <- factor(sdi$combine)
+summary(sdi$combine)
+
+assay(sdm, 'est_counts') <- logcounts(sdm)
+assay(sdm, 'est_counts')@x <- 2^assay(sdm, 'est_counts')@x-1
+gc()
+sdcom <- cbind(assay(sdi, 'est_counts'), assay(sdm, 'est_counts'))
+sdcom_annots <- data.frame(celltype = c(sdi$combine, sdm$annotation_level_1), cellname = c(colnames(sdi), colnames(sdm)))
+str(sdcom_annots)
+```
+
+
+```{r - Immune deconvolution}
+#Following requires 70GB of memory: can remove unwanted genes and reduce cell numbers to get similar (not exact) profile
+
+sdcom_profile <- create_profile_matrix(mtx = sdcom,            # cell x gene count matrix
+                                       cellAnnots = sdcom_annots,  # cell annotations with cell type and cell name as columns
+                                       cellTypeCol = "celltype",  # column containing cell type
+                                       cellNameCol = "cellname",           # column containing cell ID/name
+                                       matrixName = "sdi_profile", # name of final profile matrix
+                                       outDir = NULL,                    # path to desired output directory, set to NULL if matrix should not be written
+                                       normalize = FALSE,                # raw counts are normalised here
+                                       minCellNum = 5,                   # minimum number of cells of one type needed to create profile, exclusive
+                                       minGenes = 10,                    # minimum number of genes expressed in a cell, exclusive
+                                       scalingFactor = 1,                # what should all values be multiplied by for final matrix
+                                       discardCellTypes = TRUE)
+
+sdcom_safe <- sdcom_profile[intersect(rownames(sdcom_profile), rownames(safeTME)),-c(5,7)]
+saveRDS(sdcom_safe, 'out/sdcom_safe.RDS')
+
+#sparse->dense coercion: allocating vector of size 44.6 GiB
+
+
+gc()
+```
+
+
+```{r - Immune deconvolution}
+sdcom_safe <- readRDS('out/sdcom_safe.RDS')
+
+
+colnames(com_spe) <- com_spe$ID_simple
+batched_counts <- assay(com_spe, 'Limma')
+rawbatch <- counts(com_spe)
+batch.observation.mean.neg <-  batched_counts["NegProbe-WTX", ]
+batched_bg = sweep(batched_counts * 0, 2, batch.observation.mean.neg, "+")
+dim(batched_bg)
+
+
+
+
+sdcom_safe_com_res = spatialdecon(norm = batched_counts,
+                                  raw = rawbatch,
+                                  bg = batched_bg,
+                                  X = sdcom_safe,
+                                  cell_counts = com_spe$AOINucleiCount)
+
+saveRDS(sdcom_safe_com_res, 'out/sdcom_safe_com_res.RDS')
+
+```
+
+
+
+
+
+
+
+
+```{r}
+
+order <- c('CD8 T Cell', 'CD4 T Cell', 'Treg', 'Natural Killer Cell', 'B Cell', 'Neutrophil', 'Dendritic Cell', 'Macrophage', 'Microglial Cell', 'Monocyte', 'Mast Cell')
+
+sample_proportions <- t(rbind(rowMeans(sdcom_safe_com_res$prop_of_all[, str_detect(com_spe$ID_simple, 'GBM_1.*I')]),
+                              rowMeans(sdcom_safe_com_res$prop_of_all[, str_detect(com_spe$ID_simple, 'GBM_2.*I')]),
+                              rowMeans(sdcom_safe_com_res$prop_of_all[, str_detect(com_spe$ID_simple, 'GBM_3.*I')]),
+                              rowMeans(sdcom_safe_com_res$prop_of_all[, str_detect(com_spe$ID_simple, 'A_1.*I')]),
+                              rowMeans(sdcom_safe_com_res$prop_of_all[, str_detect(com_spe$ID_simple, 'A_2.*I')])))
+colnames(sample_proportions) <- c('GBM_1', 'GBM_2', 'GBM_3', 'A_1', 'A_2')
+
+
+pdf(file  = 'out_figures/patient_average_immune_deconvolution.pdf', height = 10, width = 10)
+
+draw(HeatmapAnnotation(height = unit(10, 'cm'), width = unit(6, 'cm'),'Sample' = anno_text(colnames(sample_proportions)),
+                       'Immune Deconvolution \nMyeloid' = anno_barplot(t(sweep(sample_proportions[order[6:11],], 2, colSums(sample_proportions[order,]), '/')),
+                                                                  height = unit(100, 'points'),
+                                                                  gp = gpar(fill = c('neutrophil' = '#22A846',
+                                                                                     'dendritic cell' ='#098A5F', 'macrophage'='#41A1B9',
+                                                                                     'microglial cell'='#2678B6', 'monocyte'='#B37FD1',
+                                                                                     'mast cell' ='#A8A2A8')),
+                                                                  border = FALSE, bar_width = 0.9),
+                       'Lymphoid' = anno_barplot(-t(sweep(sample_proportions[order[5:1],], 2, colSums(sample_proportions[order,]), '/')),
+                                            height = unit(50, 'points'), ylim = c(-0.5,0), axis =T, axis_param = list(at = c(-0.5), labels = c('0.5')),
+                                            gp = gpar(fill = rev(c('CD8 T cell' ='#C12F19', 'CD4 T cell' ='#CD683C',
+                                                                   'Treg'= '#EE760D', 'natural killer cell' ='#EC9E16',
+                                                                   'B cell' ='#F2BD10'))),
+                                            border = FALSE, bar_width = 0.9)), y= unit(10, 'in'), x = unit(3, 'in'))
+
+dev.off()
+
+draw(HeatmapAnnotation(height = unit(10, 'cm'), width = unit(6, 'cm'),'Sample' = anno_text(colnames(sample_proportions)),
+                       'Immune Deconvolution \nMyeloid' = anno_barplot(t(sweep(sample_proportions[order[6:11],], 2, colSums(sample_proportions[order,]), '/')),
+                                                                  height = unit(100, 'points'),
+                                                                  gp = gpar(fill = c('neutrophil' = '#22A846',
+                                                                                     'dendritic cell' ='#098A5F', 'macrophage'='#41A1B9',
+                                                                                     'microglial cell'='#2678B6', 'monocyte'='#B37FD1',
+                                                                                     'mast cell' ='#A8A2A8')),
+                                                                  border = FALSE, bar_width = 0.9),
+                       'Lymphoid' = anno_barplot(-t(sweep(sample_proportions[order[5:1],], 2, colSums(sample_proportions[order,]), '/')),
+                                            height = unit(50, 'points'), ylim = c(-0.5,0), axis =T, axis_param = list(at = c(-0.5), labels = c('0.5')),
+                                            gp = gpar(fill = rev(c('CD8 T cell' ='#C12F19', 'CD4 T cell' ='#CD683C',
+                                                                   'Treg'= '#EE760D', 'natural killer cell' ='#EC9E16',
+                                                                   'B cell' ='#F2BD10'))),
+                                            border = FALSE, bar_width = 0.9)), y= unit(10, 'in'), x = unit(3, 'in'))
+
+```
+
+```{r}
+sdcom_safe_scaled <- t(scale(t(sdcom_safe), scale =T))
+Immune_top_genes <- list()
+for(i in colnames(sdcom_safe_scaled)[1:11]){Immune_top_genes[[i]] <- names(sort(sdcom_safe_scaled[rownames(sdcom_safe_scaled) %in% rownames(com_spe),i], decreasing = T)[1:5])}
+Immune_top_genes <- unlist(Immune_top_genes[1:55])
+immune_row_annot <- str_sub(names(Immune_top_genes), start =1, end = nchar(names(Immune_top_genes))-1)
+
+genemap <- assay(com_spe, 'logLimma')[Immune_top_genes,com_spe$ROI_Type =='CD45' & com_spe$class =='GBM']
+colnames(genemap) <- com_spe$ID_simple[com_spe$ROI_Type =='CD45' & com_spe$class =='GBM']
+
+matched <- com_spe$ID_simple[c(2:3, 5:6, 8:13, 18:19, 22:25, 31:54)]
+
+top_ha <- HeatmapAnnotation('Immune Deconvolution \nMyeloid' = anno_barplot(t(sweep(sdcom_safe_com_res$prop_of_all[order[6:11],], 2, colSums(sdcom_safe_com_res$prop_of_all[order,]), '/')),
+                                                                  height = unit(100, 'points'),
+                                                                  gp = gpar(fill = c('neutrophil' = '#22A846',
+                                                                                     'dendritic cell' ='#098A5F', 'macrophage'='#41A1B9',
+                                                                                     'microglial cell'='#2678B6', 'monocyte'='#B37FD1',
+                                                                                     'mast cell' ='#A8A2A8')),
+                                                                  border = FALSE, bar_width = 0.9)[com_spe$ROI_Type =='CD45' & com_spe$class =='GBM'],
+                            'Lymphoid' = anno_barplot(-t(sweep(sdcom_safe_com_res$prop_of_all[order[5:1],], 2, colSums(sdcom_safe_com_res$prop_of_all[order,]), '/')),
+                                           height = unit(60, 'points'), ylim = c(-0.6,0), axis =T, axis_param = list(at = c(-0.5), labels = c('0.5')),
+                                           gp = gpar(fill = rev(c('CD8 T cell' ='#C12F19', 'CD4 T cell' ='#CD683C',
+                                                              'Treg'= '#EE760D', 'natural killer cell' ='#EC9E16',
+                                                              'B cell' ='#F2BD10'))),
+                                           border = FALSE, bar_width = 0.9)[com_spe$ROI_Type =='CD45' & com_spe$class =='GBM'],
+                            'Cell State Deconvolution' = anno_barplot(t(cout_com_res$prop_of_all),
+                                                                      height = unit(100, 'points'),
+                                                                      gp = gpar(fill = c('Oligo' = '#A3F2D2',
+                                                                                         'Progenitor' = '#FEFEA6',
+                                                                                         'Neuronal' = '#CCA7FB',
+                                                                                         'Mesenchymal' = '#F36A6A',
+                                                                                         'Astro' ='#83BCF3')),
+                                                                      border = FALSE, bar_width = 0.9)[com_spe$ROI_Type == 'tumor' & com_spe$class =='GBM' & com_spe$ID_simple %in% matched])
+
+
+column_ha <- HeatmapAnnotation(Sample = com_spe$ID_Sample[com_spe$ROI_Type =='CD45' & com_spe$class =='GBM'],
+                               Classification = com_spe$Classification[com_spe$ROI_Type =='CD45' & com_spe$class =='GBM'],
+                               'Ivy GAP' = com_spe$IVYGAP[com_spe$ROI_Type =='CD45' & com_spe$class =='GBM'],
+                               Infiltration = com_spe$Infiltration[com_spe$ROI_Type =='CD45' & com_spe$class =='GBM'],
+                               'Tumour Phase' = com_spe$Phase[com_spe$ROI_Type == 'tumor' & com_spe$class =='GBM' & com_spe$ID_simple %in% matched],
+                               'Tumour Hypoxia' = com_spe$log2Hypoxia[com_spe$ROI_Type == 'tumor' & com_spe$class =='GBM' & com_spe$ID_simple %in% matched],
+                               'Nuclei Count' = anno_barplot(cbind(com_spe$AOINucleiCount[com_spe$ROI_Type =='CD45' & com_spe$class =='GBM'],
+                                                                   com_spe$AOINucleiCount[com_spe$ROI_Type == 'tumor' & com_spe$class =='GBM'& com_spe$ID_simple %in% matched]),
+                                                             gp = gpar(fill = c('#F8F241', '#3AC640')), height = unit(50, 'pt'), beside = T, attach =T, bar_width = 0.9),
+                               col = list(Sample = c("A_2"='#78BC4A', "GBM_2"='#A581F8',
+                                                     "GBM_3"='#841CD1', "A_1"='#1CD150',
+                                                     "GBM_1"='#DF38DC', 'A_3' = '#069649'),
+                                          Classification = c('Normal' = '#4AED25', 'Border' = '#FA9C44', 'Ki67- Border' = '#FEFB40', 'Tumour' = '#023975'),
+                                          'Ivy GAP' = c('Cellular Tumour' = '#0D1089', 'Cellular Tumour + Microvascular Proliferation' = '#0C34D5', 
+                                                     'Infiltrating Tumour' = '#6180D8', 'Necrosis' = '#6B0917', 'Perinecrotic Zone' = '#A82134',
+                                                     'Pseudo-palisading cells Around the Necrosis' = '#954F59', 'Tumour Leading Edge' = '#B88709'),
+                                          Infiltration = c('High' = '#EAACB5', 'Low' = '#ACE9EA'),
+                                          'Tumour Phase' = c('S' = 'green', 'G2M' = 'blue', 'G1' = 'red'),
+                                          'Tumour Hypoxia' = colorRamp2(c(520, 565), c( "white", "#0C7D10"))))               #450 to 565 to match across heatmaps
+
+
+row_annot <- rowAnnotation('Marker' = immune_row_annot, col = list('Marker' = c(c('CD8 T Cell' ='#C12F19', 'CD4 T Cell' ='#CD683C',
+                                                                                  'Treg'= '#EE760D', 'Natural Killer Cell' ='#EC9E16',
+                                                                                  'B Cell' ='#F2BD10', 'Neutrophil' = '#22A846',
+                                                                                  'Dendritic Cell' ='#098A5F', 'Macrophage'='#41A1B9',
+                                                                                  'Microglial Cell'='#2678B6', 'Monocyte'='#B37FD1',
+                                                                                  'Mast Cell' ='#A8A2A8'))), show_annotation_name = c('Marker' = FALSE), show_legend = F)
+
+
+
+
+lgd_list <- list(immune_lgd = Legend(labels = rownames(sdcom_safe_com_res$prop_of_all[rev(order),]), title = "Immune Deconvolution",
+                                     legend_gp = gpar(fill = rev(c('CD8 T cell' ='#C12F19', 'CD4 T cell' ='#CD683C',
+                                                                   'Treg'= '#EE760D', 'Natural Killer Cell' ='#EC9E16',
+                                                                   'B cell' ='#F2BD10', 'Neutrophil' = '#22A846',
+                                                                   'Dendritic Cell' ='#098A5F', 'Macrophage'='#41A1B9',
+                                                                   'Microglial Cell'='#2678B6', 'Monocyte'='#B37FD1',
+                                                                   'Mast Cell' ='#A8A2A8')))),
+                 tumour_lgd = Legend(labels = rev(rownames(cout_com_res$prop_of_all)), title = "Cell State Deconvolution", 
+                                     legend_gp = gpar(fill = rev(c('Oligo' = '#A3F2D2','Progenitor' = '#FEFEA6',
+                                                                  'Neuronal' = '#CCA7FB', 'Mesenchymal' = '#F36A6A','Astro' ='#83BCF3')))),
+                 nuclei_lgd = Legend(labels = c('Immune', 'Tumour'), title = "Nuclei Count", 
+                                     legend_gp = gpar(fill = c('Immune' = '#F8F241', 'Tumour' ='#3AC640'))))
+
+
+pdf(file  = 'out_figures/Immune_deconvolution_gbm.pdf', height = 13, width = 15)
+
+
+draw(Heatmap(t(scale(t(genemap),
+                     scale = TRUE)), row_names_gp = gpar(fontsize = unit(6, 'cm')), name = 'Scaled Gene Expression', column_split = com_spe$class[com_spe$ROI_Type =='CD45' & com_spe$class =='GBM'],
+             bottom_annotation = column_ha, top_annotation = top_ha, right_annotation = row_annot,
+             row_title_rot = 0,row_split = immune_row_annot), annotation_legend_list = lgd_list)
+
+dev.off()
+
+draw(Heatmap(t(scale(t(genemap),
+                     scale = TRUE)), row_names_gp = gpar(fontsize = unit(6, 'cm')), name = 'Scaled Gene Expression', column_split = com_spe$class[com_spe$ROI_Type =='CD45' & com_spe$class =='GBM'],
+             bottom_annotation = column_ha, top_annotation = top_ha, right_annotation = row_annot,
+             row_title_rot = 0,row_split = immune_row_annot), annotation_legend_list = lgd_list)
+
+```
+
+
+
+```{r}
+
+
+
+pdf(file  = 'out_figures/immune_decon_heatmap_signature.pdf', height = 10, width = 12)
+
+draw(Heatmap(sweep(sdcom_safe, 1, apply(sdcom_safe, 1, max), "/"), show_row_names = F, name = 'Scaled Gene Expression',row_dend_width = unit(4, 'cm')))
+
+dev.off()
+
+
+draw(Heatmap(sweep(sdcom_safe, 1, apply(sdcom_safe, 1, max), "/"), show_row_names = F, name = 'Scaled Gene Expression',row_dend_width = unit(4, 'cm')))
+
+order <- c('CD8 T Cell', 'CD4 T Cell', 'Treg', 'Natural Killer Cell', 'B Cell', 'Neutrophil', 'Dendritic Cell', 'Macrophage', 'Microglial Cell', 'Monocyte', 'Mast Cell', 'Neoplastic', 'Non-neoplastic')
+
+
+genes <- c('P2RY12', 'AHR', 'TMEM119', 'SALL1', 'VDR', 'ITGA4')
+genemap <- assay(com_spe, 'logLimma')[genes,com_spe$ROI_Type =='CD45']
+colnames(genemap) <- com_spe$ID_simple[com_spe$ROI_Type =='CD45']
+
+
+top_ha <- HeatmapAnnotation('Immune Deconvolution' = anno_barplot(t(sdcom_safe_com_res$prop_of_all[order,]),
+                                                                  height = unit(100, 'points'), axis_param = list(at =c(0.5, 1)),
+                                                                  gp = gpar(fill = c('CD8 T cell' ='#C12F19', 'CD4 T cell' ='#CD683C',
+                                                                                     'Treg'= '#EE760D', 'natural killer cell' ='#EC9E16',
+                                                                                     'B cell' ='#F2BD10', 'neutrophil' = '#22A846',
+                                                                                     'dendritic cell' ='#098A5F', 'macrophage'='#41A1B9',
+                                                                                     'microglial cell'='#2678B6', 'monocyte'='#B37FD1',
+                                                                                     'mast cell' ='#A8A2A8', 'Neoplastic' = 'white',
+                                                                                     'Non-neoplastic'= 'black')),
+                                                                  border = FALSE, bar_width = 0.9)[com_spe$ROI_Type =='CD45'],
+                            'Cell State Deconvolution' = anno_barplot(t(cout_com_res$prop_of_all),
+                                                                      height = unit(100, 'points'), axis_param = list(at =c(0, 0.5, 1), labels = c('0', '0.5', '0\n1')),
+                                                                      gp = gpar(fill = c('Oligo' = '#A3F2D2',
+                                                                                         'Progenitor' = '#FEFEA6',
+                                                                                         'Neuronal' = '#CCA7FB',
+                                                                                         'Mesenchymal' = '#F36A6A',
+                                                                                         'Astro' ='#83BCF3')),
+                                                                      border = FALSE, bar_width = 0.9)[com_spe$ROI_Type == 'tumor' & com_spe$ID_simple %in% matched])
+
+
+column_ha <- HeatmapAnnotation(Sample = com_spe$ID_Sample[com_spe$ROI_Type =='CD45'],
+                               Classification = com_spe$Classification[com_spe$ROI_Type =='CD45'],
+                               'Ivy GAP' = com_spe$IVYGAP[com_spe$ROI_Type =='CD45'],
+                               Infiltration = com_spe$Infiltration[com_spe$ROI_Type =='CD45'],
+                               'Tumour Phase' = com_spe$Phase[com_spe$ROI_Type =='tumor' & com_spe$ID_simple %in% matched],
+                               'Tumour Hypoxia' = com_spe$log2Hypoxia[com_spe$ROI_Type =='tumor' & com_spe$ID_simple %in% matched],
+                               'Nuclei Count' = anno_barplot(cbind(com_spe$AOINucleiCount[com_spe$ROI_Type =='CD45'],
+                                                                   com_spe$AOINucleiCount[com_spe$ROI_Type =='tumor' & com_spe$ID_simple %in% matched]),
+                                                             gp = gpar(fill = c('#F8F241', '#3AC640')), height = unit(50, 'pt'), beside = T, attach =T, bar_width = 0.9),
+                               col = list(Sample = c("A_2"='#78BC4A', "GBM_2"='#A581F8',
+                                                     "GBM_3"='#841CD1', "A_1"='#1CD150',
+                                                     "GBM_1"='#DF38DC', 'A_3' = '#069649'),
+                                          Classification = c('Normal' = '#4AED25', 'Border' = '#FA9C44', 'Ki67- Border' = '#FEFB40', 'Tumour' = '#023975'),
+                                          'Ivy GAP' = c('Cellular Tumour' = '#0D1089', 'Cellular Tumour + Microvascular Proliferation' = '#0C34D5', 
+                                                     'Infiltrating Tumour' = '#6180D8', 'Necrosis' = '#6B0917', 'Perinecrotic Zone' = '#A82134',
+                                                     'Pseudo-palisading cells Around the Necrosis' = '#954F59', 'Tumour Leading Edge' = '#B88709'),
+                                          Infiltration = c('High' = '#EAACB5', 'Low' = '#ACE9EA'),
+                                          'Tumour Phase' = c('S' = 'green', 'G2M' = 'blue', 'G1' = 'red'),
+                                          'Tumour Hypoxia' = colorRamp2(c(520, 565), c( "white", "#0C7D10"))))               #450 to 565 to match across heatmaps
+
+
+
+lgd_list <- list(immune_lgd = Legend(labels = rownames(sdcom_safe_com_res$prop_of_all[rev(order),]), title = "Immune Deconvolution", 
+                                     legend_gp = gpar(fill = rev(c('CD8 T cell' ='#C12F19', 'CD4 T cell' ='#CD683C',
+                                                                   'Treg'= '#EE760D', 'Natural Killer Cell' ='#EC9E16',
+                                                                   'B cell' ='#F2BD10', 'Neutrophil' = '#22A846',
+                                                                   'Dendritic Cell' ='#098A5F', 'Macrophage'='#41A1B9',
+                                                                   'Microglial Cell'='#2678B6', 'Monocyte'='#B37FD1',
+                                                                   'Mast Cell' ='#A8A2A8', 'Neoplastic' = 'white','Non-neoplastic'= 'black')))),
+                 tumour_lgd = Legend(labels = rev(rownames(cout_com_res$prop_of_all)), title = "Cell State Deconvolution", 
+                                     legend_gp = gpar(fill = rev(c('Oligo' = '#A3F2D2','Progenitor' = '#FEFEA6','Neuronal' = '#CCA7FB',
+                                                                   'Mesenchymal' = '#F36A6A','Astro' ='#83BCF3')))),
+                 nuclei_lgd = Legend(labels = c('Immune', 'Tumour'), title = "Nuclei Count", 
+                                     legend_gp = gpar(fill = c('Immune' = '#F8F241', 'Tumour' ='#3AC640'))))
+
+pdf(file  = 'out_figures/Immune_deconvolution_tumour_cell_capture.pdf', height = 10, width = 15)
+
+draw(Heatmap(t(scale(t(genemap),
+                     scale = TRUE)), name = 'Scaled Gene Expression', column_split = com_spe$class[com_spe$ROI_Type =='CD45'],bottom_annotation = column_ha, top_annotation = top_ha), annotation_legend_list = lgd_list)
+
+dev.off()
+
+draw(Heatmap(t(scale(t(genemap),
+                     scale = TRUE)), name = 'Scaled Gene Expression', column_split = com_spe$class[com_spe$ROI_Type =='CD45'],bottom_annotation = column_ha, top_annotation = top_ha), annotation_legend_list = lgd_list)
+
+
+
+```
+
+
+```{r}
+
+sdcom_immune <- sdcom_safe[, -c(12,13)]
+
+colnames(com_spe) <- com_spe$ID_simple
+batched_counts <- assay(com_spe, 'Limma')
+rawbatch <- counts(com_spe)
+batch.observation.mean.neg <-  batched_counts["NegProbe-WTX", ]
+batched_bg = sweep(batched_counts * 0, 2, batch.observation.mean.neg, "+")
+dim(batched_bg)
+
+
+
+
+sdcom_immune_com_res = spatialdecon(norm = batched_counts,
+                                  raw = rawbatch,
+                                  bg = batched_bg,
+                                  X = sdcom_immune,
+                                  cell_counts = com_spe$AOINucleiCount)
+
+sdcom_immune_subset_tmp <- sdcom_immune_com_res$prop_of_all[, str_detect(com_spe$ID_simple, 'I')]
+sdcom_immune_subset <- as.vector(sdcom_immune_subset_tmp)
+names(sdcom_immune_subset) <- rep(rownames(sdcom_immune_subset_tmp), ncol(sdcom_immune_subset_tmp))
+
+sdcom_safe_subset_tmp <- sweep(sdcom_safe_com_res$prop_of_all[-c(12,13),], 2, colSums(sdcom_safe_com_res$prop_of_all[-c(12,13),]), '/')
+sdcom_safe_subset_tmp <- sdcom_safe_subset_tmp[, str_detect(com_spe$ID_simple, 'I')]
+sdcom_safe_subset <- as.vector(sdcom_safe_subset_tmp)
+names(sdcom_safe_subset) <- rep(rownames(sdcom_safe_subset_tmp), ncol(sdcom_safe_subset_tmp))
+
+names(sdcom_safe_subset) <- rep(rownames(sdcom_safe_subset_tmp), ncol(sdcom_safe_subset_tmp))
+
+cor_df <- data.frame(list('sdcom_safe' = sdcom_safe_subset, 'sdcom_immune' = sdcom_immune_subset,
+                          'celltype' = factor(names(sdcom_safe_subset), levels = 
+                                              c('CD8 T Cell', 'CD4 T Cell',
+                                                'Treg', 'Natural Killer Cell',
+                                                'B Cell', 'Neutrophil',
+                                                'Dendritic Cell', 'Macrophage',
+                                                'Microglial Cell', 'Monocyte',
+                                                'Mast Cell'))))
+
+ggplot(as.data.frame(sdcom_safe_subset), aes(x = sdcom_safe_subset, y = sdcom_immune_subset, col = names(sdcom_immune_subset))) +
+  geom_abline()+geom_point(size =4)+theme_minimal()+ xlab('Relative proportion including tumour cells estimation') +
+  ylab('Relative proportion estimating immune cells only') +
+  stat_cor(data =cor_df, aes(x =sdcom_safe, y= sdcom_immune, col = celltype, size =6)) +
+  theme(axis.text=element_text(size=12), axis.title = element_text(size = 16)) + guides(col=guide_legend(title="Immune Cell Type"))+
+  scale_colour_manual(values = c('CD8 T Cell' ='#C12F19', 'CD4 T Cell' ='#CD683C',
+                                 'Treg'= '#EE760D', 'Natural Killer Cell' ='#EC9E16',
+                                 'B Cell' ='#F2BD10', 'Neutrophil' = '#22A846',
+                                 'Dendritic Cell' ='#098A5F', 'Macrophage'='#41A1B9',
+                                 'Microglial Cell'='#2678B6', 'Monocyte'='#B37FD1',
+                                 'Mast Cell' ='#A8A2A8'))
+
+ggplot(as.data.frame(sdcom_safe_subset), aes(x = sdcom_safe_subset, y = sdcom_immune_subset, col = names(sdcom_immune_subset))) +
+  geom_abline()+geom_point(size =4)+theme_minimal()+ xlab('Relative proportion including tumour cells estimation') +
+  ylab('Relative proportion estimating immune cells only') +
+  theme(axis.text=element_text(size=12), axis.title = element_text(size = 16)) + guides(col=guide_legend(title="Immune Cell Type"))+
+  scale_colour_manual(values = c('CD8 T Cell' ='#C12F19', 'CD4 T Cell' ='#CD683C',
+                                 'Treg'= '#EE760D', 'Natural Killer Cell' ='#EC9E16',
+                                 'B Cell' ='#F2BD10', 'Neutrophil' = '#22A846',
+                                 'Dendritic Cell' ='#098A5F', 'Macrophage'='#41A1B9',
+                                 'Microglial Cell'='#2678B6', 'Monocyte'='#B37FD1',
+                                 'Mast Cell' ='#A8A2A8'))
+
+ggsave('out_figures/sdcom_immune_proportions_correlation_plot.pdf', width = 10, height = 8)
+
+
+```
+```{r}
+sdcom_safe_subset_samples <- cbind(rowMeans(sdcom_safe_subset_tmp[,str_detect(colnames(sdcom_safe_subset_tmp), 'A_1')]),
+                                 rowMeans(sdcom_safe_subset_tmp[,str_detect(colnames(sdcom_safe_subset_tmp), 'A_2')]),
+                                 rowMeans(sdcom_safe_subset_tmp[,str_detect(colnames(sdcom_safe_subset_tmp), 'GBM_1')]),
+                                 rowMeans(sdcom_safe_subset_tmp[,str_detect(colnames(sdcom_safe_subset_tmp), 'GBM_2')]),
+                                 rowMeans(sdcom_safe_subset_tmp[,str_detect(colnames(sdcom_safe_subset_tmp), 'GBM_3')]))
+colnames(sdcom_safe_subset_samples) <- c('A_1', 'A_2', 'GBM_1', 'GBM_2', 'GBM_3')
+
+
+
+geomx_immune <- c(sdcom_safe_subset_samples[c(1:8),'GBM_1'], sum(sdcom_safe_subset_samples[c(9,10,11),'GBM_1']))
+names(geomx_immune)[c(1,9)] <- c('Microglia', 'CD4/CD8 T Cell')
+
+immune_jj98_only <- readRDS('/stornext/Bioinf/data/lab_brain_cancer/projects/tme_spatial/cosmx/data/sce_immune_jj98_only.rds')
+cosmx_immune <- c(summary(factor(immune_jj98_only$Anno))/ncol(immune_jj98_only), numeric(5))
+names(cosmx_immune) <- c(c('CD4/CD8 T Cell', 'Monocyte', 'Macrophage', 'Microglia'), names(geomx_immune)[c(2,5:8)])
+
+
+
+order <- c('CD4/CD8 T Cell', 'Natural Killer Cell', 'B Cell', 'Neutrophil', 'Dendritic Cell', 'Macrophage', 'Microglia', 'Monocyte', 'Mast Cell')
+
+geomx_immune[order]
+cosmx_immune[order]
+
+gbm1_compare <- cbind(geomx_immune[order], cosmx_immune[order])
+colnames(gbm1_compare) <- c('GeoMx', 'CosMx')
+
+immune_ha <- HeatmapAnnotation('Immune Deconvolution' = anno_barplot(t(gbm1_compare[order[1:9],]),
+                                                                               height = unit(300, 'points'),
+                                                                               gp = gpar(fill = c('CD4/CD8 T cell' ='#C12F19', 'Natural killer cell' ='#EC9E16',
+                                                                                                  'B cell' ='#F2BD10', 'Neutrophil' = '#22A846',
+                                                                                                  'Dendritic cell' ='#098A5F', 'Macrophage'='#41A1B9',
+                                                                                                  'Microglial cell'='#2678B6', 'Monocyte'='#B37FD1',
+                                                                                                  'Mast cell' ='#A8A2A8')),
+                                                                               border = FALSE, bar_width = 1))
+
+
+immune_lgd = Legend(labels = rev(order), title = "Immune Deconvolution", legend_gp = gpar(fill = rev(c('CD4/CD8 T Cell' ='#C12F19', 'Natural Killer Cell' ='#EC9E16',
+                                                                                                       'B Cell' ='#F2BD10', 'Neutrophil' = '#22A846',
+                                                                                                       'Dendritic Cell' ='#098A5F', 'Macrophage'='#41A1B9',
+                                                                                                       'Microglia'='#2678B6', 'Monocyte'='#B37FD1',
+                                                                                                       'Mast Cell' ='#A8A2A8'))))
+
+                                                                                                                                                  
+
+pdf(file  = 'out_figures/gbm1_cosmx_geomx_comparison.pdf', height = 7, width = 7)
+
+
+draw(Heatmap(gbm1_compare, rect_gp = gpar(type = "none"),
+             show_heatmap_legend = F, cluster_columns = F,
+             show_row_dend = F, show_row_names = F,
+             top_annotation = immune_ha, heatmap_width = unit (3, 'inch')), annotation_legend_list = immune_lgd)
+
+dev.off()
+
+draw(Heatmap(gbm1_compare, rect_gp = gpar(type = "none"),
+             show_heatmap_legend = F, cluster_columns = F,
+             show_row_dend = F, show_row_names = F,
+             top_annotation = immune_ha, heatmap_width = unit (3, 'inch')), annotation_legend_list = immune_lgd)
+
+
+```
+
+
+
+```{r - correlation plot}
+loc_df <- com_spe$immune[com_spe$ROI_Type == 'CD45' & com_spe$ID_simple %in% matched & com_spe$class =='GBM']
+loc_mm <- model.matrix(~0+loc_df)
+colnames(loc_mm) <- gsub('loc_df', '', colnames(loc_mm))
+
+cor_obj <- rbind(sdcom_safe_com_res$prop_of_all[rowSums(sdcom_safe_com_res$prop_of_all) >0,com_spe$ROI_Type =='CD45' & com_spe$class =='GBM'][1:11,],
+                 cout_com_res$prop_of_all[,com_spe$ROI_Type == 'tumor' & com_spe$ID_simple %in% matched & com_spe$class =='GBM'],
+                 t(loc_mm))
+rownames(cor_obj) <- c("Microglial Cell", "Dendritic Cell", "Monocyte", "Macrophage", "Mast Cell", "NK Cell","B Cell",
+                       "Neutrophil", "Treg", "CD8 T Cell", "CD4 T Cell", "Oligodendrocyte", "Progenitor", "Neuronal",
+                       "Mesenchymal", "Astrocyte", "Edge", "Outside", "Tumour")
+  
+  
+pdf(file = 'out_figures/correlation_cluster.pdf', height = 10, width = 10)
+corrplot(cor(t(cor_obj)), order = 'hclust',addrect =3, number.cex = 0.75, addCoef.col = 'black', method = 'color', col = colorRampPalette(c('purple', 'black', 'yellow'))(200), rect.col = 'grey', tl.col = 'black', tl.pos = 'lt')
+dev.off()
+
+pdf(file = 'out_figures/correlation_upper.pdf', height = 10, width = 10)
+corrplot(cor(t(cor_obj)), order = 'hclust', number.cex = 0.75, addCoef.col = 'black', method = 'color', col = colorRampPalette(c('purple', 'black', 'yellow'))(200), addgrid.col = 'white', tl.col = 'black', tl.pos = 'lt', type = 'upper')
+dev.off()
+
+
+corrplot(cor(t(cor_obj)), order = 'hclust',addrect =3, number.cex = 0.75, addCoef.col = 'black', method = 'color', col = colorRampPalette(c('purple', 'black', 'yellow'))(200), rect.col = 'grey', tl.col = 'black', tl.pos = 'lt')
+
+corrplot(cor(t(cor_obj)), order = 'hclust', number.cex = 0.75, addCoef.col = 'black', method = 'color', col = colorRampPalette(c('purple', 'black', 'yellow'))(200), addgrid.col = 'white', tl.col = 'black', tl.pos = 'lt', type = 'upper')
+```
+
+
+
+
+
+```{r -  propeller and variance testing}
+props <- cout_nuc_res$prop_of_all[,str_detect(nuc_spe$GFAPpos_Ki67, fixed('A.'))]
+counts <- matrix(rep(nuc_spe$AOINucleiCount[str_detect(nuc_spe$GFAPpos_Ki67, fixed('A.'))], 5), nrow = 5, byrow =T) 
+
+clustcounts <- round(props*counts)
+numcells <- colSums(round(props*counts))
+biorep <- rep(names(numcells),numcells)
+
+cellclust <- c()
+for(i in colnames(clustcounts)){
+  cellclust <- c(cellclust, rep(rownames(clustcounts), clustcounts[,i]))
+}
+
+grp = rep(nuc_spe$Ki67[str_detect(nuc_spe$GFAPpos_Ki67, fixed('A.'))], numcells)
+
+propeller(clusters = cellclust, sample = biorep, group = grp,
+          robust = FALSE, trend = FALSE, transform="logit")
+
+
+
+
+
+
+
+props <- cout_nuc_res$prop_of_all[,str_detect(nuc_spe$GFAPpos_Ki67, fixed('GBM.'))]
+counts <- matrix(rep(nuc_spe$AOINucleiCount[str_detect(nuc_spe$GFAPpos_Ki67, fixed('GBM.'))], 5), nrow = 5, byrow =T) 
+
+clustcounts <- round(props*counts)
+numcells <- colSums(round(props*counts))
+biorep <- rep(names(numcells),numcells)
+
+cellclust <- c()
+for(i in colnames(clustcounts)){
+  cellclust <- c(cellclust, rep(rownames(clustcounts), clustcounts[,i]))
+}
+
+grp = rep(nuc_spe$Ki67[str_detect(nuc_spe$GFAPpos_Ki67, fixed('GBM.'))], numcells)
+
+propeller(clusters = cellclust, sample = biorep, group = grp,
+          robust = FALSE, trend = FALSE, transform="logit")
+
+
+
+
+props <- cout_com_res$prop_of_all[,!str_detect(com_spe$ID_simple, 'I')]
+counts <- matrix(rep(com_spe$AOINucleiCount[!str_detect(com_spe$ID_simple, 'I')], 5), nrow = 5, byrow =T)
+
+clustcounts <- round(props*counts)
+numcells <- colSums(round(props*counts))
+biorep <- rep(names(numcells),numcells)
+
+cellclust <- c()
+for(i in colnames(clustcounts)){
+  cellclust <- c(cellclust, rep(rownames(clustcounts), clustcounts[,i]))
+}
+
+grp = rep(com_spe$class[!str_detect(com_spe$ID_simple, 'I')], numcells)
+
+
+propeller(clusters = cellclust, sample = biorep, group = grp,
+          robust = FALSE, trend = FALSE, transform="logit")
+
+
+
+
+
+props <- cout_nuc_res$prop_of_all[,!str_detect(nuc_spe$ID_simple, 'I')]
+counts <- matrix(rep(nuc_spe$AOINucleiCount[!str_detect(nuc_spe$ID_simple, 'I')], 5), nrow = 5, byrow =T)
+
+clustcounts <- round(props*counts)
+numcells <- colSums(round(props*counts))
+biorep <- rep(names(numcells),numcells)
+
+cellclust <- c()
+for(i in colnames(clustcounts)){
+  cellclust <- c(cellclust, rep(rownames(clustcounts), clustcounts[,i]))
+}
+
+grp = rep(nuc_spe$Ki67[!str_detect(nuc_spe$ID_simple, 'I')], numcells)
+
+
+propeller(clusters = cellclust, sample = biorep, group = grp,
+          robust = FALSE, trend = FALSE, transform="logit")
+
+
+
+
+
+props <- cout_com_res$prop_of_all[,!str_detect(com_spe$ID_simple, 'I')]
+
+var.test(props['Progenitor', str_detect(colnames(props),'A')], props['Progenitor', str_detect(colnames(props),'GBM')])
+var.test(props['Neuronal', str_detect(colnames(props),'A')], props['Neuronal', str_detect(colnames(props),'GBM')])
+var.test(props['Astro', str_detect(colnames(props),'A')], props['Astro', str_detect(colnames(props),'GBM')])
+var.test(props['Oligo', str_detect(colnames(props),'A')], props['Oligo', str_detect(colnames(props),'GBM')])
+var.test(props['Mesenchymal', str_detect(colnames(props),'A')], props['Mesenchymal', str_detect(colnames(props),'GBM')])
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+

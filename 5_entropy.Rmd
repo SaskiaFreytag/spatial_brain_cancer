@@ -1,0 +1,524 @@
+---
+title: "5_entropy"
+author: "Joel Moffet"
+date: "2023-03-21"
+output: html_document
+---
+
+```{r - function}
+GetFreqShrink <- function(transposeCounts, ind, N, Total){
+
+  count <- transposeCounts@x[(transposeCounts@p[ind]+1) : transposeCounts@p[ind+1]]
+  elements <- transposeCounts@i[(transposeCounts@p[ind]+1) : transposeCounts@p[ind+1]]+1
+
+  freq <- count / Total[ind]
+
+  freq
+}
+
+
+decompose_entropy <- function(CountsMatrix, Identity, geneset){
+  
+  CountsMatrix <- CountsMatrix[geneset,]
+  
+  Total <- Matrix::rowSums(CountsMatrix)
+  N <- ncol(CountsMatrix)
+
+  Ng <- as.vector(table(Identity))
+  transposeCounts <- as(Matrix::t(CountsMatrix), "dgCMatrix")
+
+  Indices <- length(transposeCounts@p)-1
+  InterType <- vector("numeric", length(Indices))
+  IntraType <- vector("numeric", length(Indices))
+  outprod <- list()
+
+  for (ind in 1:Indices) {
+    freqshrink <- GetFreqShrink(transposeCounts, ind, N, Total)
+    groupedfreqshrink <- tapply(freqshrink, Identity, sum)
+
+    NonZero <- which(groupedfreqshrink != 0)
+    
+    xdivy <- mapply(x=split(freqshrink, Identity), y=groupedfreqshrink,
+                    function(x,y) x/y, SIMPLIFY = FALSE)
+
+    logxdivy <- mapply(x=xdivy, y=Ng, function(x,y) log(y*x), SIMPLIFY = FALSE)
+    
+    prod <- mapply(x=xdivy, y=logxdivy, function(x,y) sum(x*y))
+    outprod[[ind]] <- prod
+
+    InterType[ind] <- t(groupedfreqshrink[NonZero]) %*% log(N*groupedfreqshrink[NonZero]/Ng[NonZero])
+    IntraType[ind] <- groupedfreqshrink[NonZero] %*% prod[NonZero]
+  }
+
+  InterType[is.infinite(InterType)] <- 0
+  IntraType[is.infinite(IntraType)] <- 0
+  
+  names(IntraType) <- geneset
+  names(InterType) <- geneset
+
+  return(list(Inter=sum(InterType), Intra=sum(IntraType), Intra_all = sort(IntraType, decreasing = T), Inter_all = sort(InterType, decreasing = T))) 
+}
+
+
+
+
+
+
+
+
+get_decomp <- function(CountsMatrix, Identity){
+
+colnames(CountsMatrix) <- Identity
+Identity <- sapply(Identity, function(x) strsplit(x, ".", fixed=TRUE)[[1]][1])
+
+shannon_cout_list <- list()
+for(i in colnames(profile_cout_scaled)){shannon_cout_list[[i]] <- decompose_entropy(CountsMatrix, Identity, Cout_Genesets[[i]])}
+
+for(i in 1:5){
+  shannon_cout_df$Inter[i] <- decompose_entropy(CountsMatrix, Identity, Cout_Genesets[[i]])[[1]]
+  shannon_cout_df$Intra[i] <- decompose_entropy(CountsMatrix, Identity, Cout_Genesets[[i]])[[2]]
+}
+return(shannon_cout_df)}
+
+```
+
+
+```{r}
+library(ggrepel)
+library(stringr)
+library(xlsx)
+library(ComplexHeatmap)
+library(circlize)
+```
+
+```{r}
+profile_cout <- readRDS('out/profile_cout.RDS')
+nuc_spe <- readRDS('out/nuc_spe.RDS')
+com_spe <- readRDS('out/com_spe.RDS')
+
+profile_cout_scaled <- t(scale(t(profile_cout), scale =T))
+Cout_Genesets <- list()
+for(i in colnames(profile_cout_scaled)){Cout_Genesets[[i]] <- names(sort(profile_cout_scaled[rownames(profile_cout_scaled) %in% rownames(nuc_spe),i], decreasing = T)[1:50])}
+
+shannon_cout_df <- data.frame(geneset = names(Cout_Genesets), Inter = numeric(ncol(profile_cout_scaled)), Intra = numeric(ncol(profile_cout_scaled)))
+
+
+
+CountsMatrix <- assay(nuc_spe, 'Q3normcounts')[, str_detect(nuc_spe$ID_simple, 'A') & !str_detect(nuc_spe$ID_simple, 'I')]
+Identity <- nuc_spe$ID_simple[str_detect(nuc_spe$ID_simple, 'A') & !str_detect(nuc_spe$ID_simple, 'I')]
+
+shannon_cout_df <- get_decomp(CountsMatrix, Identity)
+write.xlsx( shannon_cout_df,'out/entropy/Cout_entropy_A.xlsx', sheetName = 'separate')
+
+
+CountsMatrix <- assay(com_spe, 'Q3normcounts')[, str_detect(com_spe$ID_simple, 'A.*T')]
+Identity <- com_spe$ID_simple[str_detect(com_spe$ID_simple, 'A.*T')]
+
+shannon_cout_df <- get_decomp(CountsMatrix, Identity)
+write.xlsx( shannon_cout_df,'out/entropy/Cout_entropy_A.xlsx', sheetName = 'combined', append = T)
+
+
+CountsMatrix <- assay(nuc_spe, 'Q3normcounts')[, str_detect(nuc_spe$ID_simple, 'A') & nuc_spe$Ki67 == 'positive']
+Identity <- nuc_spe$ID_simple[str_detect(nuc_spe$ID_simple, 'A') & nuc_spe$Ki67 == 'positive']
+
+shannon_cout_df <- get_decomp(CountsMatrix, Identity)
+write.xlsx( shannon_cout_df,'out/entropy/Cout_entropy_A.xlsx', sheetName = 'positive', append = T)
+
+
+CountsMatrix <- assay(nuc_spe, 'Q3normcounts')[, str_detect(nuc_spe$ID_simple, 'A') & nuc_spe$Ki67 == 'negative']
+Identity <- nuc_spe$ID_simple[str_detect(nuc_spe$ID_simple, 'A') & nuc_spe$Ki67 == 'negative']
+
+shannon_cout_df <- get_decomp(CountsMatrix, Identity)
+write.xlsx( shannon_cout_df,'out/entropy/Cout_entropy_A.xlsx', sheetName = 'negative', append = T)
+
+
+
+
+CountsMatrix <- assay(nuc_spe, 'Q3normcounts')[, str_detect(nuc_spe$ID_simple, 'GBM') & !str_detect(nuc_spe$ID_simple, 'I') & !nuc_spe$ID_simple =='GBM_1.6.T']
+Identity <- nuc_spe$ID_simple[str_detect(nuc_spe$ID_simple, 'GBM') & !str_detect(nuc_spe$ID_simple, 'I') & !nuc_spe$ID_simple =='GBM_1.6.T']
+
+shannon_cout_df <- get_decomp(CountsMatrix, Identity)
+write.xlsx( shannon_cout_df,'out/entropy/Cout_entropy_GBM.xlsx', sheetName = 'separate')
+
+
+CountsMatrix <- assay(com_spe, 'Q3normcounts')[, str_detect(com_spe$ID_simple, 'GBM.*T') & !com_spe$ID_simple =='GBM_1.6.T']
+Identity <- com_spe$ID_simple[str_detect(com_spe$ID_simple, 'GBM.*T') & !com_spe$ID_simple =='GBM_1.6.T']
+
+shannon_cout_df <- get_decomp(CountsMatrix, Identity)
+write.xlsx( shannon_cout_df,'out/entropy/Cout_entropy_GBM.xlsx', sheetName = 'combined', append = T)
+
+
+CountsMatrix <- assay(nuc_spe, 'Q3normcounts')[, str_detect(nuc_spe$ID_simple, 'GBM') & nuc_spe$Ki67 == 'positive']
+Identity <- nuc_spe$ID_simple[str_detect(nuc_spe$ID_simple, 'GBM') & nuc_spe$Ki67 == 'positive']
+
+shannon_cout_df <- get_decomp(CountsMatrix, Identity)
+write.xlsx( shannon_cout_df,'out/entropy/Cout_entropy_GBM.xlsx', sheetName = 'positive', append = T)
+
+
+CountsMatrix <- assay(nuc_spe, 'Q3normcounts')[, str_detect(nuc_spe$ID_simple, 'GBM') & nuc_spe$Ki67 == 'negative']
+Identity <- nuc_spe$ID_simple[str_detect(nuc_spe$ID_simple, 'GBM') & nuc_spe$Ki67 == 'negative']
+
+shannon_cout_df <- get_decomp(CountsMatrix, Identity)
+write.xlsx( shannon_cout_df,'out/entropy/Cout_entropy_GBM.xlsx', sheetName = 'negative', append = T)
+
+
+
+
+
+CountsMatrix <- assay(nuc_spe, 'Q3normcounts')[, str_detect(nuc_spe$ID_simple, 'A') & !str_detect(nuc_spe$ID_simple, 'A_1') &!str_detect(nuc_spe$ID_simple, 'I')]
+Identity <- nuc_spe$ID_simple[str_detect(nuc_spe$ID_simple, 'A') & !str_detect(nuc_spe$ID_simple, 'A_1') &!str_detect(nuc_spe$ID_simple, 'I')]
+
+shannon_cout_df <- get_decomp(CountsMatrix, Identity)
+write.xlsx( shannon_cout_df,'out/entropy/Cout_entropy_justA.xlsx', sheetName = 'separate')
+
+
+CountsMatrix <- assay(com_spe, 'Q3normcounts')[, str_detect(com_spe$ID_simple, 'A.*T') & !str_detect(com_spe$ID_simple, 'A_1')]
+Identity <- com_spe$ID_simple[str_detect(com_spe$ID_simple, 'A.*T') & !str_detect(com_spe$ID_simple, 'A_1')]
+
+shannon_cout_df <- get_decomp(CountsMatrix, Identity)
+write.xlsx( shannon_cout_df,'out/entropy/Cout_entropy_justA.xlsx', sheetName = 'combined', append = T)
+
+
+CountsMatrix <- assay(nuc_spe, 'Q3normcounts')[, str_detect(nuc_spe$ID_simple, 'A') & nuc_spe$Ki67 == 'positive' & !str_detect(nuc_spe$ID_simple, 'A_1')]
+Identity <- nuc_spe$ID_simple[str_detect(nuc_spe$ID_simple, 'A') & nuc_spe$Ki67 == 'positive' & !str_detect(nuc_spe$ID_simple, 'A_1')]
+
+shannon_cout_df <- get_decomp(CountsMatrix, Identity)
+write.xlsx( shannon_cout_df,'out/entropy/Cout_entropy_justA.xlsx', sheetName = 'positive', append = T)
+
+
+CountsMatrix <- assay(nuc_spe, 'Q3normcounts')[, str_detect(nuc_spe$ID_simple, 'A') & nuc_spe$Ki67 == 'negative' & !str_detect(nuc_spe$ID_simple, 'A_1')]
+Identity <- nuc_spe$ID_simple[str_detect(nuc_spe$ID_simple, 'A') & nuc_spe$Ki67 == 'negative' & !str_detect(nuc_spe$ID_simple, 'A_1')]
+
+shannon_cout_df <- get_decomp(CountsMatrix, Identity)
+write.xlsx( shannon_cout_df,'out/entropy/Cout_entropy_justA.xlsx', sheetName = 'negative', append = T)
+
+
+
+```
+
+
+```{r}
+CountsMatrix <- assay(com_spe, 'Q3normcounts')[, str_detect(com_spe$ID_simple, 'T') & !com_spe$ID_simple =='GBM_1.6.T']
+Identity <- com_spe$ID_simple[str_detect(com_spe$ID_simple, 'T') & !com_spe$ID_simple =='GBM_1.6.T']
+colnames(CountsMatrix) <- Identity
+Identity <- sapply(Identity, function(x) strsplit(x, ".", fixed=TRUE)[[1]][1])
+
+everything_T <- decompose_entropy(CountsMatrix, Identity, rownames(com_spe))
+MeanExp <- rowMeans(CountsMatrix)
+
+
+CountsMatrix <- assay(com_spe, 'Q3normcounts')[, str_detect(com_spe$ID_simple, 'GBM.*T') & !com_spe$ID_simple =='GBM_1.6.T']
+Identity <- com_spe$ID_simple[str_detect(com_spe$ID_simple, 'GBM.*T') & !com_spe$ID_simple =='GBM_1.6.T']
+colnames(CountsMatrix) <- Identity
+Identity <- sapply(Identity, function(x) strsplit(x, ".", fixed=TRUE)[[1]][1])
+
+everything_GBM_T <- decompose_entropy(CountsMatrix, Identity, rownames(com_spe))
+
+CountsMatrix <- assay(com_spe, 'Q3normcounts')[, str_detect(com_spe$ID_simple, 'A.*T')]
+Identity <- com_spe$ID_simple[str_detect(com_spe$ID_simple, 'A.*T')]
+colnames(CountsMatrix) <- Identity
+Identity <- sapply(Identity, function(x) strsplit(x, ".", fixed=TRUE)[[1]][1])
+
+everything_A_T <- decompose_entropy(CountsMatrix, Identity, rownames(com_spe))
+
+com_T_normout_df <- data.frame(Inter = c(everything_T$Inter, everything_T$Inter_all[rownames(com_spe)]), Intra = c(everything_T$Intra, everything_T$Intra_all[rownames(com_spe)]),
+                               MeanExp = c(mean(MeanExp), MeanExp),
+                           GBM_Inter = c(everything_GBM_T$Inter, everything_GBM_T$Inter_all[rownames(com_spe)]), GBM_Intra = c(everything_GBM_T$Intra, everything_GBM_T$Intra_all[rownames(com_spe)]),
+                           A_Inter = c(everything_A_T$Inter, everything_A_T$Inter_all[rownames(com_spe)]), A_Intra = c(everything_A_T$Intra, everything_A_T$Intra_all[rownames(com_spe)]))
+
+write.xlsx(com_T_normout_df, 'out/entropy/Tumor_Genes_Entropy_combined.xlsx', sheetName = 'combined')
+
+
+
+
+
+
+
+CountsMatrix <- assay(nuc_spe, 'Q3normcounts')[, !str_detect(nuc_spe$ID_simple, 'I') & !nuc_spe$ID_simple =='GBM_1.6.T']
+Identity <- nuc_spe$ID_simple[!str_detect(nuc_spe$ID_simple, 'I') & !nuc_spe$ID_simple =='GBM_1.6.T']
+colnames(CountsMatrix) <- Identity
+Identity <- sapply(Identity, function(x) strsplit(x, ".", fixed=TRUE)[[1]][1])
+
+everything_T <- decompose_entropy(CountsMatrix, Identity, rownames(nuc_spe))
+MeanExp <- rowMeans(CountsMatrix)
+
+CountsMatrix <- assay(nuc_spe, 'Q3normcounts')[, str_detect(nuc_spe$ID_simple, 'GBM') & !str_detect(nuc_spe$ID_simple, 'I') & !nuc_spe$ID_simple =='GBM_1.6.T']
+Identity <- nuc_spe$ID_simple[str_detect(nuc_spe$ID_simple, 'GBM') & !str_detect(nuc_spe$ID_simple, 'I') & !nuc_spe$ID_simple =='GBM_1.6.T']
+colnames(CountsMatrix) <- Identity
+Identity <- sapply(Identity, function(x) strsplit(x, ".", fixed=TRUE)[[1]][1])
+
+everything_GBM_T <- decompose_entropy(CountsMatrix, Identity, rownames(nuc_spe))
+
+
+CountsMatrix <- assay(nuc_spe, 'Q3normcounts')[, str_detect(nuc_spe$ID_simple, 'A') & !str_detect(nuc_spe$ID_simple, 'I')]
+Identity <- nuc_spe$ID_simple[str_detect(nuc_spe$ID_simple, 'A') & !str_detect(nuc_spe$ID_simple, 'I')]
+colnames(CountsMatrix) <- Identity
+Identity <- sapply(Identity, function(x) strsplit(x, ".", fixed=TRUE)[[1]][1])
+
+everything_A_T <- decompose_entropy(CountsMatrix, Identity, rownames(nuc_spe))
+
+nuc_T_normout_df <- data.frame(Inter = c(everything_T$Inter, everything_T$Inter_all[rownames(com_spe)]), Intra = c(everything_T$Intra, everything_T$Intra_all[rownames(com_spe)]),
+                               MeanExp = c(mean(MeanExp), MeanExp),
+                           GBM_Inter = c(everything_GBM_T$Inter, everything_GBM_T$Inter_all[rownames(com_spe)]), GBM_Intra = c(everything_GBM_T$Intra, everything_GBM_T$Intra_all[rownames(com_spe)]),
+                           A_Inter = c(everything_A_T$Inter, everything_A_T$Inter_all[rownames(com_spe)]), A_Intra = c(everything_A_T$Intra, everything_A_T$Intra_all[rownames(com_spe)]))
+
+write.xlsx(nuc_T_normout_df, 'out/entropy/Tumor_Genes_Entropy_separate.xlsx', sheetName = 'separate')
+
+
+
+
+
+
+
+
+
+CountsMatrix <- assay(nuc_spe, 'Q3normcounts')[, str_detect(nuc_spe$GFAPpos_Ki67, 'pos') & !nuc_spe$ID_simple =='GBM_1.6.T']
+Identity <- nuc_spe$ID_simple[str_detect(nuc_spe$GFAPpos_Ki67, 'pos') & !nuc_spe$ID_simple =='GBM_1.6.T']
+colnames(CountsMatrix) <- Identity
+Identity <- sapply(Identity, function(x) strsplit(x, ".", fixed=TRUE)[[1]][1])
+
+everything_T <- decompose_entropy(CountsMatrix, Identity, rownames(nuc_spe))
+MeanExp <- rowMeans(CountsMatrix)
+
+
+CountsMatrix <- assay(nuc_spe, 'Q3normcounts')[, str_detect(nuc_spe$GFAPpos_Ki67, 'GBM.*pos') & !str_detect(nuc_spe$ID_simple, 'I') & !nuc_spe$ID_simple =='GBM_1.6.T']
+Identity <- nuc_spe$ID_simple[str_detect(nuc_spe$GFAPpos_Ki67, 'GBM.*pos') & !str_detect(nuc_spe$ID_simple, 'I') & !nuc_spe$ID_simple =='GBM_1.6.T']
+colnames(CountsMatrix) <- Identity
+Identity <- sapply(Identity, function(x) strsplit(x, ".", fixed=TRUE)[[1]][1])
+
+everything_GBM_T <- decompose_entropy(CountsMatrix, Identity, rownames(nuc_spe))
+
+CountsMatrix <- assay(nuc_spe, 'Q3normcounts')[, str_detect(nuc_spe$GFAPpos_Ki67, 'A.*pos') & !str_detect(nuc_spe$ID_simple, 'I')]
+Identity <- nuc_spe$ID_simple[str_detect(nuc_spe$GFAPpos_Ki67, 'A.*pos') & !str_detect(nuc_spe$ID_simple, 'I')]
+colnames(CountsMatrix) <- Identity
+Identity <- sapply(Identity, function(x) strsplit(x, ".", fixed=TRUE)[[1]][1])
+
+everything_A_T <- decompose_entropy(CountsMatrix, Identity, rownames(nuc_spe))
+
+nuc_T_pos_normout_df <- data.frame(Inter = c(everything_T$Inter, everything_T$Inter_all[rownames(com_spe)]), Intra = c(everything_T$Intra, everything_T$Intra_all[rownames(com_spe)]),
+                                   MeanExp = c(mean(MeanExp), MeanExp),
+                               GBM_Inter = c(everything_GBM_T$Inter, everything_GBM_T$Inter_all[rownames(com_spe)]), GBM_Intra = c(everything_GBM_T$Intra, everything_GBM_T$Intra_all[rownames(com_spe)]),
+                               A_Inter = c(everything_A_T$Inter, everything_A_T$Inter_all[rownames(com_spe)]), A_Intra = c(everything_A_T$Intra, everything_A_T$Intra_all[rownames(com_spe)]))
+
+write.xlsx(nuc_T_pos_normout_df, 'out/entropy/Tumor_Genes_Entropy_separate_positive.xlsx', sheetName = 'separate_positive')
+
+
+
+
+
+
+
+
+CountsMatrix <- assay(nuc_spe, 'Q3normcounts')[, str_detect(nuc_spe$GFAPpos_Ki67, 'neg') & !nuc_spe$ID_simple =='GBM_1.6.T']
+Identity <- nuc_spe$ID_simple[str_detect(nuc_spe$GFAPpos_Ki67, 'neg') & !nuc_spe$ID_simple =='GBM_1.6.T']
+colnames(CountsMatrix) <- Identity
+Identity <- sapply(Identity, function(x) strsplit(x, ".", fixed=TRUE)[[1]][1])
+
+everything_T <- decompose_entropy(CountsMatrix, Identity, rownames(nuc_spe))
+MeanExp <- rowMeans(CountsMatrix)
+
+
+CountsMatrix <- assay(nuc_spe, 'Q3normcounts')[, str_detect(nuc_spe$GFAPpos_Ki67, 'GBM.*neg') & !str_detect(nuc_spe$ID_simple, 'I') & !nuc_spe$ID_simple =='GBM_1.6.T']
+Identity <- nuc_spe$ID_simple[str_detect(nuc_spe$GFAPpos_Ki67, 'GBM.*neg') & !str_detect(nuc_spe$ID_simple, 'I') & !nuc_spe$ID_simple =='GBM_1.6.T']
+colnames(CountsMatrix) <- Identity
+Identity <- sapply(Identity, function(x) strsplit(x, ".", fixed=TRUE)[[1]][1])
+
+everything_GBM_T <- decompose_entropy(CountsMatrix, Identity, rownames(nuc_spe))
+
+CountsMatrix <- assay(nuc_spe, 'Q3normcounts')[, str_detect(nuc_spe$GFAPpos_Ki67, 'A.*neg') & !str_detect(nuc_spe$ID_simple, 'I')]
+Identity <- nuc_spe$ID_simple[str_detect(nuc_spe$GFAPpos_Ki67, 'A.*neg') & !str_detect(nuc_spe$ID_simple, 'I')]
+colnames(CountsMatrix) <- Identity
+Identity <- sapply(Identity, function(x) strsplit(x, ".", fixed=TRUE)[[1]][1])
+
+everything_A_T <- decompose_entropy(CountsMatrix, Identity, rownames(nuc_spe))
+
+nuc_T_neg_normout_df <- data.frame(Inter = c(everything_T$Inter, everything_T$Inter_all[rownames(com_spe)]), Intra = c(everything_T$Intra, everything_T$Intra_all[rownames(com_spe)]),
+                                   MeanExp = c(mean(MeanExp), MeanExp),
+                                   GBM_Inter = c(everything_GBM_T$Inter, everything_GBM_T$Inter_all[rownames(com_spe)]), GBM_Intra = c(everything_GBM_T$Intra, everything_GBM_T$Intra_all[rownames(com_spe)]),
+                                   A_Inter = c(everything_A_T$Inter, everything_A_T$Inter_all[rownames(com_spe)]), A_Intra = c(everything_A_T$Intra, everything_A_T$Intra_all[rownames(com_spe)]))
+
+write.xlsx(nuc_T_neg_normout_df, 'out/entropy/Tumor_Genes_Entropy_separate_negative.xlsx', sheetName = 'separate_negative')
+
+
+
+
+
+
+filtered_noKi67 <- c('GBM_1.1.T', 'GBM_1.2.T', 'GBM_1.3.T', 'GBM_2.2.T', 'GBM_2.3.T', 'GBM_2.6.T', 'A_1.2.T', 'A_1.3.T', 'A_2.6.T', 'A_3.2.T', 'A_3.3.T', 'A_3.4.T')
+
+
+CountsMatrix <- assay(nuc_spe, 'Q3normcounts')[, str_detect(nuc_spe$GFAPpos_Ki67, 'neg') & nuc_spe$ID_simple %in% filtered_noKi67 & !nuc_spe$ID_simple =='GBM_1.6.T']
+Identity <- nuc_spe$ID_simple[str_detect(nuc_spe$GFAPpos_Ki67, 'neg') & nuc_spe$ID_simple %in% filtered_noKi67 & !nuc_spe$ID_simple =='GBM_1.6.T']
+colnames(CountsMatrix) <- Identity
+Identity <- sapply(Identity, function(x) strsplit(x, ".", fixed=TRUE)[[1]][1])
+
+everything_T <- decompose_entropy(CountsMatrix, Identity, rownames(nuc_spe))
+MeanExp <- rowMeans(CountsMatrix)
+
+
+CountsMatrix <- assay(nuc_spe, 'Q3normcounts')[, str_detect(nuc_spe$GFAPpos_Ki67, 'GBM.*neg') & nuc_spe$ID_simple %in% filtered_noKi67 & !nuc_spe$ID_simple =='GBM_1.6.T']
+Identity <- nuc_spe$ID_simple[str_detect(nuc_spe$GFAPpos_Ki67, 'GBM.*neg') & nuc_spe$ID_simple %in% filtered_noKi67 & !nuc_spe$ID_simple =='GBM_1.6.T']
+colnames(CountsMatrix) <- Identity
+Identity <- sapply(Identity, function(x) strsplit(x, ".", fixed=TRUE)[[1]][1])
+
+everything_GBM_T <- decompose_entropy(CountsMatrix, Identity, rownames(nuc_spe))
+
+CountsMatrix <- assay(nuc_spe, 'Q3normcounts')[, str_detect(nuc_spe$GFAPpos_Ki67, 'A.*neg') & nuc_spe$ID_simple %in% filtered_noKi67 & !nuc_spe$ID_simple =='GBM_1.6.T']
+Identity <- nuc_spe$ID_simple[str_detect(nuc_spe$GFAPpos_Ki67, 'A.*neg') & nuc_spe$ID_simple %in% filtered_noKi67 & !nuc_spe$ID_simple =='GBM_1.6.T']
+colnames(CountsMatrix) <- Identity
+Identity <- sapply(Identity, function(x) strsplit(x, ".", fixed=TRUE)[[1]][1])
+
+everything_A_T <- decompose_entropy(CountsMatrix, Identity, rownames(nuc_spe))
+
+nuc_T_filtered_normout_df <- data.frame(Inter = c(everything_T$Inter, everything_T$Inter_all[rownames(com_spe)]), Intra = c(everything_T$Intra, everything_T$Intra_all[rownames(com_spe)]),
+                                        MeanExp = c(mean(MeanExp), MeanExp),
+                                        GBM_Inter = c(everything_GBM_T$Inter, everything_GBM_T$Inter_all[rownames(com_spe)]), GBM_Intra = c(everything_GBM_T$Intra, everything_GBM_T$Intra_all[rownames(com_spe)]),
+                                        A_Inter = c(everything_A_T$Inter, everything_A_T$Inter_all[rownames(com_spe)]), A_Intra = c(everything_A_T$Intra, everything_A_T$Intra_all[rownames(com_spe)]))
+
+write.xlsx(nuc_T_filtered_normout_df, 'out/entropy/Tumor_Genes_Entropy_separate_filtered.xlsx', sheetName = 'separate_filtered')
+
+
+```
+
+
+
+```{r}
+entropy_A <- rbind(read.xlsx('out/entropy/Cout_entropy_A.xlsx', sheetName = 'positive'), 
+                    read.xlsx('out/entropy/Cout_entropy_A.xlsx', sheetName = 'negative'),
+                    read.xlsx('out/entropy/Cout_entropy_A.xlsx', sheetName = 'combined'), 
+                    read.xlsx('out/entropy/Cout_entropy_A.xlsx', sheetName = 'separate'))
+entropy_A$category <- c(rep('Ki67+',5), rep('Ki67-',5), rep('combined',5),rep('separated',5))
+
+ggplot(entropy_A, aes(x= Intra, y = Inter, fill = geneset, shape = category, size =3)) +
+  geom_point(size=7)+theme_minimal() + scale_shape_manual(values = c(21, 22, 23, 24)) +
+  scale_fill_manual(values = c('Oligo' = '#A3F2D2',
+                               'Progenitor' = '#FEFEA6',
+                               'Neuronal' = '#CCA7FB',
+                               'Mesenchymal' = '#F36A6A',
+                               'Astro' ='#83BCF3')) + xlim(c(0,8)) +ylim(c(0,8)) + geom_abline() +theme(axis.text=element_text(size=20), legend.text = element_text(size=20), axis.title = element_text(size=20), legend.title = element_text(size=20))+ xlab('Within') +ylab('Between')
+
+
+ggsave('out_figures/cout_geneset_entropy_A.png', height = 10, width = 12, bg = 'white')
+
+
+
+entropy_justA <- rbind(read.xlsx('out/entropy/Cout_entropy_justA.xlsx', sheetName = 'positive'), 
+                    read.xlsx('out/entropy/Cout_entropy_justA.xlsx', sheetName = 'negative'),
+                    read.xlsx('out/entropy/Cout_entropy_justA.xlsx', sheetName = 'combined'), 
+                    read.xlsx('out/entropy/Cout_entropy_justA.xlsx', sheetName = 'separate'))
+entropy_justA$category <- c(rep('Ki67+',5), rep('Ki67-',5), rep('combined',5),rep('separated',5))
+
+ggplot(entropy_justA, aes(x= Intra, y = Inter, fill = geneset, shape = category, size =3)) +
+  geom_point(size=7)+theme_minimal() + scale_shape_manual(values = c(21, 22, 23, 24)) +
+  scale_fill_manual(values = c('Oligo' = '#A3F2D2',
+                               'Progenitor' = '#FEFEA6',
+                               'Neuronal' = '#CCA7FB',
+                               'Mesenchymal' = '#F36A6A',
+                               'Astro' ='#83BCF3')) + xlim(c(0,8)) +ylim(c(0,8)) + geom_abline() +theme(axis.text=element_text(size=20), legend.text = element_text(size=20), axis.title = element_text(size=20), legend.title = element_text(size=20))+ xlab('Within') +ylab('Between')
+
+
+ggsave('out_figures/cout_geneset_entropy_justA.png', height = 10, width = 12, bg = 'white')
+
+
+
+
+entropy_GBM <- rbind(read.xlsx('out/entropy/Cout_entropy_GBM.xlsx', sheetName = 'positive'), 
+                    read.xlsx('out/entropy/Cout_entropy_GBM.xlsx', sheetName = 'negative'),
+                    read.xlsx('out/entropy/Cout_entropy_GBM.xlsx', sheetName = 'combined'), 
+                    read.xlsx('out/entropy/Cout_entropy_GBM.xlsx', sheetName = 'separate'))
+entropy_GBM$category <- c(rep('Ki67+',5), rep('Ki67-',5), rep('combined',5),rep('separated',5))
+
+ggplot(entropy_GBM, aes(x= Intra, y = Inter, fill = geneset, shape = category, size =3)) +
+  geom_point(size=7)+theme_minimal() + scale_shape_manual(values = c(21, 22, 23, 24)) +
+  scale_fill_manual(values = c('Oligo' = '#A3F2D2',
+                               'Progenitor' = '#FEFEA6',
+                               'Neuronal' = '#CCA7FB',
+                               'Mesenchymal' = '#F36A6A',
+                               'Astro' ='#83BCF3')) + xlim(c(0,10)) +ylim(c(0,10)) + geom_abline() +theme(axis.text=element_text(size=20), legend.text = element_text(size=20), axis.title = element_text(size=20), legend.title = element_text(size=20))+ xlab('Within') +ylab('Between')
+
+
+ggsave('out_figures/cout_geneset_entropy_GBM.png', height = 10, width = 12, bg = 'white')
+
+
+
+
+ent_com <- read.xlsx('out/entropy/Tumor_Genes_Entropy_combined.xlsx', sheetIndex = 1)
+df <- data.frame(gene = ent_com$NA., Inter = ent_com$GBM_Inter, Intra = ent_com$GBM_Intra)
+df$label <- character(14190)
+df$label[which(df$gene %in% c(df[order(df$Inter,decreasing = TRUE),]$gene[2:21], 
+                              df[order(df$Intra,decreasing = TRUE),]$gene[2:21]))]<- df$gene[which(df$gene %in% c(df[order(df$Inter,decreasing = TRUE),]$gene[2:21],
+                                                                                                                  df[order(df$Intra,decreasing = TRUE),]$gene[2:21]))]
+ggplot(df[-1,], aes(x= Intra, y = Inter, label = label))+ geom_point() + geom_text_repel(data = df[nchar(df$label)>1,], position = position_nudge_repel(y = 0.01)) + 
+  xlab('Within') +ylab('Between') + geom_abline() + theme_minimal() + ggtitle('GBM Entropy genes')
+
+ggsave('out_figures/gbm_entropy_gene.png', width = 7, height = 7, bg = 'white')
+
+
+
+cout_com_res <- readRDS('out/cout_com_res.RDS')
+
+top_ha <- HeatmapAnnotation(
+  'Cell State Deconvolution' = anno_barplot(t(cout_com_res$prop_of_all),
+                                            height = unit(100, 'points'),
+                                            gp = gpar(fill = c('Oligo' = '#A3F2D2',
+                                                               'Progenitor' = '#FEFEA6',
+                                                               'Neuronal' = '#CCA7FB',
+                                                               'Mesenchymal' = '#F36A6A',
+                                                               'Astro' ='#83BCF3')),
+                                            border = FALSE, bar_width = 0.9)[com_spe$ROI_Type != 'CD45'])
+
+
+column_ha <- HeatmapAnnotation(Classification = com_spe$Classification[com_spe$ROI_Type !='CD45'],
+                               IVYGAP = com_spe$IVYGAP[com_spe$ROI_Type !='CD45'],
+                               Ki67 = com_spe$Ki67[com_spe$ROI_Type != 'CD45'],
+                               Infiltration = com_spe$Infiltration[com_spe$ROI_Type !='CD45'],
+                               'Tumour Phase' = com_spe$Phase[com_spe$ROI_Type !='CD45'],
+                               'Tumour Hypoxia' = com_spe$log2Hypoxia[com_spe$ROI_Type !='CD45'],
+                               'Nuclei Count' = anno_barplot(com_spe$AOINucleiCount[com_spe$ROI_Type !='CD45'],
+                                                             gp = gpar(fill = c('#3AC640'), bar_width = 0.9)),
+                               'Library Size' = anno_barplot(com_spe$lib_size[com_spe$ROI_Type !='CD45'],
+                                                             gp = gpar(fill = c('#3AC640'), bar_width = 0.9)),
+                               col = list(Sample = c("A_2"='#78BC4A', "GBM_2"='#A581F8',
+                                                     "GBM_3"='#841CD1', "A_1"='#1CD150',
+                                                     "GBM_1"='#DF38DC', 'A_3' = '#069649'),
+                                          Classification = c('Normal' = '#4AED25', 'Border' = '#FA9C44', 'Ki67- Border' = '#FEFB40', 'Tumour' = '#023975'),
+                                          IVYGAP = c('Cellular Tumour' = '#0D1089', 'Cellular Tumour + Microvascular Proliferation' = '#0C34D5', 
+                                                     'Infiltrating Tumour' = '#6180D8', 'Necrosis' = '#6B0917', 'Perinecrotic Zone' = '#A82134',
+                                                     'Pseudo-palisading cells Around the Necrosis' = '#954F59', 'Tumour Leading Edge' = '#B88709'),
+                                          Ki67 = c('non' = 'grey', 'negative' = 'blue', 'positive' = 'red'),
+                                          Infiltration = c('High' = '#EAACB5', 'Low' = '#ACE9EA'),
+                                          'Tumour Phase' = c('S' = 'green', 'G2M' = 'blue', 'G1' = 'red'),
+                                          'Tumour Hypoxia' = colorRamp2(c(450, 525), c( "white", "#0C7D10"))))               #450 to 565 to match across heatmaps
+
+
+
+lgd_list <- list(tumour_lgd = Legend(labels = rev(rownames(cout_com_res$prop_of_all)), title = "Cell State Deconvolution", legend_gp = gpar(fill = rev(c('Oligo' = '#A3F2D2',
+                                                                                                                                                         'Progenitor' = '#FEFEA6',
+                                                                                                                                                         'Neuronal' = '#CCA7FB',
+                                                                                                                                                         'Mesenchymal' = '#F36A6A',
+                                                                                                                                                         'Astro' ='#83BCF3')))),
+                 nuclei_lgd = Legend(labels = c('Immune', 'Tumour'), title = "Nuclei Count / Library Size", legend_gp = gpar(fill = c('Immune' = '#F8F241', 'Tumour' ='#3AC640'))))
+
+
+top_entropy_genes <- unique(df$label)[-1]
+genemap <- assay(com_spe, 'logLimma')[top_entropy_genes,com_spe$ROI_Type !='CD45']
+colnames(genemap) <- com_spe$ID_simple[com_spe$ROI_Type !='CD45']
+
+pdf(file  = 'out_figures/shannon_entropy_genes_heatmap.pdf', height = 10, width = 15)
+
+
+draw(Heatmap(t(scale(t(genemap),
+                     scale = TRUE)), row_names_gp = gpar(fontsize = unit(6, 'cm')), name = 'Scaled Gene Expression', 
+             column_split = com_spe$ID_Sample[com_spe$ROI_Type !='CD45'], cluster_column_slices = F,
+             bottom_annotation = column_ha, top_annotation = top_ha), annotation_legend_list = lgd_list)
+
+dev.off()
+
+draw(Heatmap(t(scale(t(genemap),
+                     scale = TRUE)), row_names_gp = gpar(fontsize = unit(6, 'cm')), name = 'Scaled Gene Expression', 
+             column_split = com_spe$ID_Sample[com_spe$ROI_Type !='CD45'], cluster_column_slices = F,
+             bottom_annotation = column_ha, top_annotation = top_ha), annotation_legend_list = lgd_list)
+
+
+```
+

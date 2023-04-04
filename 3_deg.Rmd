@@ -1,0 +1,362 @@
+---
+title: "3_deg"
+author: "Joel Moffet"
+date: "2023-03-21"
+output: html_document
+---
+
+```{r - DEG analysis}
+library(edgeR)
+library(ggplot2)
+library(ggrepel)
+library(limma)
+library(simplifyEnrichment)
+library("org.Hs.eg.db")
+library(xlsx)
+
+nuc_spe <- readRDS('out/nuc_spe.RDS')
+com_spe <- readRDS('out/com_spe.RDS')
+
+doublevoom <- function(DGE , design, plot = TRUE, block, contrasts){
+  v <- voom(DGE, design = design, plot= plot)
+  corfit <- duplicateCorrelation(v, design, block = block)
+
+  v <- voom(DGE, design = design, plot=plot,block = block, correlation = corfit$cor)
+
+  corfit <- duplicateCorrelation(v, design, block = block)
+
+  vfit <- lmFit(v, design = design, block = block, correlation = corfit$cor, method = 'robust')
+  vfit <- contrasts.fit(vfit, contrasts=contrasts)
+  efit <- eBayes(vfit)
+  plotSA(efit, main="Final model: Mean-variance trend")
+
+  print(summary(decideTests(efit)))
+  return(efit)
+}
+
+#makeDGE object
+DGE <- DGEList(counts = counts(nuc_spe))
+DGE <- calcNormFactors(DGE, method = 'upperquartile')
+DGE$samples <- cbind(DGE$samples, colData(nuc_spe))
+
+comDGE <- DGEList(counts = counts(com_spe))
+comDGE <- calcNormFactors(comDGE, method = 'upperquartile')
+comDGE$samples <- cbind(comDGE$samples, colData(com_spe))
+
+#Ki67 positive vs negative
+
+GFAPpos_Ki67 <- as.factor(nuc_spe$GFAPpos_Ki67)
+Region <- as.factor(nuc_spe$Region)
+Batch <- as.factor(nuc_spe$Batch)
+Sex <- as.factor(nuc_spe$Sex)
+mm <- model.matrix(~0+GFAPpos_Ki67+Batch+Sex)
+colnames(mm) <- gsub('GFAPpos_Ki67', '', colnames(mm))
+
+contr.matrix <- makeContrasts(Aposvsneg = A.positive-A.negative,
+                              GBMposvsneg = GBM.positive-GBM.negative,
+                              levels = mm) 
+
+efit_Ki67posvneg <- doublevoom(DGE = DGE, design = mm, block = Region, contrasts = contr.matrix)
+
+#AO vs A
+
+Class <- nuc_spe$class
+Class[nuc_spe$ID_Sample =='A_1'] <- 'AO'
+Class <- as.factor(Class)
+
+mm <- model.matrix(~0+Class+Batch+Sex)
+colnames(mm) <- gsub('Class', '', colnames(mm))
+
+contr.matrix <- makeContrasts(AOvsA = AO-A,
+                              AvsGBM = A-GBM,
+                              AOvsGBM = AO-GBM,
+                              AvsGBM = (A+AO)/2-GBM,
+                              levels = mm) 
+
+efit_classes <- doublevoom(DGE = DGE, design = mm, block = Region, contrasts = contr.matrix)
+
+
+
+
+#proliferation border
+Region <- as.factor(com_spe$Region)
+Batch <- as.factor(com_spe$Batch)
+Sex <- as.factor(com_spe$Sex)
+
+proliferative_border <- as.factor(com_spe$proliferative_border)
+mm <- model.matrix(~0+proliferative_border+Batch+Sex)
+colnames(mm) <- gsub('proliferative_border', '', colnames(mm))
+
+contr.matrix <- makeContrasts(GBMtumorvsborder = GBM.tumour-GBM.border,
+                              Atumorvsborder = A.tumour-A.border,
+                              levels = mm) 
+
+efit_proliferative_border <- doublevoom(DGE = comDGE, design = mm, block = Region, contrasts = contr.matrix)
+
+
+
+
+#infiltration
+infiltration <- as.factor(com_spe$infiltration)
+mm <- model.matrix(~0+infiltration+Batch+Sex)
+colnames(mm) <- gsub('infiltration', '', colnames(mm))
+
+contr.matrix <- makeContrasts(GBMhighvslow = GBM.high-GBM.low,
+                              Ahighvslow = A.high-A.low,
+                              levels = mm) 
+
+efit_infiltration <- doublevoom(DGE = comDGE, design = mm, block = Region, contrasts = contr.matrix)
+
+#normal border
+
+normal_border <- as.factor(com_spe$normal_border)
+mm <- model.matrix(~0+normal_border+Batch+Sex)
+colnames(mm) <- gsub('normal_border', '', colnames(mm))
+
+contr.matrix <- makeContrasts(GBMnormalvsborder = GBM.normal-GBM.border,
+                              Anormalvsborder = A.normal-A.border,
+                              levels = mm) 
+
+efit_normal_border <- doublevoom(DGE = comDGE, design = mm, block = Region, contrasts = contr.matrix)
+
+
+
+
+#immune border
+
+immune_border <- as.factor(com_spe$immune_border)
+mm <- model.matrix(~0+immune_border+Batch+Sex)
+colnames(mm) <- gsub('immune_border', '', colnames(mm))
+
+contr.matrix <- makeContrasts(GBMtumorvsedge = GBM.tumour -GBM.edge,
+                              GBMtumorvsoutside = GBM.tumour-GBM.outside,
+                              GBMedgevsoutside = GBM.edge-GBM.outside,
+                              levels = mm) 
+
+efit_immune_border <- doublevoom(DGE = comDGE, design = mm, block = Region, contrasts = contr.matrix)
+
+```
+
+
+--- {volcano plots and saving DEG lists / GO Terms}
+```{r - A normal v border}
+DEG_lists <- function(efit, coef, filename, gg_title){
+  df <- topTable(efit, coef = coef, number  = Inf, adjust.method = 'fdr')
+df$label <- rep('', 14189)
+df$label[1:20] <- rownames(df)[1:20]
+
+df$DEG <- character(14189)
+for(i in 1:nrow(df)){if(df$adj.P.Val[i]<0.05 & df$logFC[i]<0){df$DEG[i] = 'down'}}
+for(i in 1:nrow(df)){if(df$adj.P.Val[i]<0.05 & df$logFC[i]>0){df$DEG[i] = 'up'}}
+for(i in 1:nrow(df)){if(df$adj.P.Val[i]>0.05){df$DEG[i] = 'non'}}
+
+ggplot(df, aes(x=logFC, y = -log10(adj.P.Val), col = DEG))+ geom_point()+scale_colour_manual(values = c('non' = 'black', 'up' = 'red', down = 'blue'))+theme_classic() +geom_text_repel(aes(label = label)) +ggtitle(paste0('DEG Analysis: ', gg_title))
+ggsave(paste0('out_figures/degs/', filename,'_volcano.png'), height = 7, width = 10)
+
+write.csv(df, paste0('out/degs/', filename, '_DEG.csv'))
+}
+
+DEG_lists(efit = efit_normal_border, coef = 1, filename = 'GBM_normal_border', gg_title = 'GBM Normal vs Border')
+
+DEG_lists(efit = efit_normal_border, coef = 2, filename = 'A_normal_border', gg_title = 'A Normal vs Border')
+
+
+DEG_lists(efit = efit_classes, coef = 1, filename = 'AOvsA', gg_title = 'AO vs A')
+
+DEG_lists(efit = efit_classes, coef = 2, filename = 'AvsGBM', gg_title = 'A vs GBM')
+
+DEG_lists(efit = efit_classes, coef = 3, filename = 'AOvsGBM', gg_title = 'AO vs GBM')
+
+
+DEG_lists(efit = efit_proliferative_border, coef = 1, filename = 'GBM_proliferative_border', gg_title = 'GBM Proliferative Tumour vs Border')
+
+DEG_lists(efit = efit_proliferative_border, coef = 2, filename = 'A_proliferative_border', gg_title = 'A Proliferative Tumour vs Border')
+
+
+DEG_lists(efit = efit_infiltration, coef = 1, filename = 'GBM_infiltration', gg_title = 'GBM Infiltration High vs Low')
+
+DEG_lists(efit = efit_infiltration, coef = 2, filename = 'A_infiltration', gg_title = 'A Infiltration High vs Low')
+
+
+DEG_lists(efit = efit_Ki67posvneg, coef = 2, filename = 'GBM_Ki67_posvneg', gg_title = 'GBM Ki67 Positive vs Negative')
+
+DEG_lists(efit = efit_Ki67posvneg, coef = 1, filename = 'A_Ki67_posvneg', gg_title = 'A Ki67 Positive vs Negative')
+
+
+DEG_lists(efit = efit_immune_border, coef = 1, filename = 'GBM_tumour_v_edge', gg_title = 'GBM Immune Border  Tumor vs Edge')
+
+DEG_lists(efit = efit_immune_border, coef = 2, filename = 'GBM_tumour_v_outside', gg_title = 'GBM Immune Border  Tumor vs Outside')
+
+DEG_lists(efit = efit_immune_border, coef = 3, filename = 'GBM_edge_v_outside', gg_title = 'GBM Immune Border  Edge vs Outside')
+
+```
+
+
+```{r}
+
+rowData(com_spe)$EntrezID <- mapIds(org.Hs.eg.db, keys = rownames(com_spe), keytype = "SYMBOL", column="ENTREZID")
+rowData(nuc_spe)$EntrezID <- mapIds(org.Hs.eg.db, keys = rownames(nuc_spe), keytype = "SYMBOL", column="ENTREZID")
+
+gfit_GBM_Ki67_pos_v_neg_T <- goana(efit_Ki67posvneg, coef = 'GBMposvsneg', geneid = rowData(nuc_spe)$EntrezID, trend = TRUE)
+gfit_A_Ki67_pos_v_neg_T <- goana(efit_Ki67posvneg, coef = 'Aposvsneg', geneid = rowData(nuc_spe)$EntrezID, trend = TRUE)
+
+gfit_GBM_tumourvsborder_T <- goana(efit_proliferative_border, coef = 'GBMtumorvsborder', geneid = rowData(com_spe)$EntrezID, trend = TRUE)
+gfit_A_tumourvsborder_T <- goana(efit_proliferative_border, coef = 'Atumorvsborder', geneid = rowData(com_spe)$EntrezID, trend = TRUE)
+
+gfit_GBM_highvslow_T <- goana(efit_infiltration, coef = 'GBMhighvslow', geneid = rowData(com_spe)$EntrezID, trend = TRUE)
+gfit_A_highvslow_T <- goana(efit_infiltration, coef = 'Ahighvslow', geneid = rowData(com_spe)$EntrezID, trend = TRUE)
+
+gfit_GBM_normal_border_T <- goana(efit_normal_border, coef = 'GBMnormalvsborder', geneid = rowData(com_spe)$EntrezID, trend = TRUE)
+gfit_A_normal_border_T <- goana(efit_normal_border, coef = 'Anormalvsborder', geneid = rowData(com_spe)$EntrezID, trend = TRUE)
+
+gfit_GBMedgevsoutside_T <- goana(efit_immune_border, coef = 'GBMedgevsoutside', geneid = rowData(com_spe)$EntrezID, trend = TRUE)
+gfit_GBMtumorvsoutside_T <- goana(efit_immune_border, coef = 'GBMtumorvsoutside', geneid = rowData(com_spe)$EntrezID, trend = TRUE)
+gfit_GBMtumorvsedge_T <- goana(efit_immune_border, coef = 'GBMtumorvsedge', geneid = rowData(com_spe)$EntrezID, trend = TRUE)
+
+
+gfit_AOvsA_T <-  goana(efit_classes, coef = 'AOvsA', geneid = rowData(nuc_spe)$EntrezID, trend = TRUE)
+gfit_AvsGBM_T <-  goana(efit_classes, coef = 'AvsGBM', geneid = rowData(nuc_spe)$EntrezID, trend = TRUE)
+
+reorganise_up <- function(x){
+  x <- x[order(x$UP.p.adjust.fdr),]
+  x <- split(x, x$semantic_cluster)
+  for(i in names(x)){x[[i]] <- x[[i]][order(x[[i]]$kappa.cluster),]}
+  bindall <- c()
+  for(i in names(x)){bindall <- rbind(bindall,x[[i]])}
+  return(bindall)
+}
+
+goana_output <- function(x, up=TRUE){
+  x$UP.p.adjust.fdr <-  p.adjust(x$P.Up, method = 'fdr')
+  x$DOWN.p.adjust.fdr <-  p.adjust(x$P.Down, method = 'fdr')
+  
+  if(up){gfit_subset <- x[x$UP.p.adjust.fdr <0.05,]}
+  if(!up){gfit_subset <- x[x$DOWN.p.adjust.fdr <0.05,]}
+  
+  out.df <- gfit_subset[gfit_subset$Ont == 'BP',]
+  
+  if(nrow(out.df) >1){upgo <- rownames(out.df)
+  
+  fullGO_mat <- GO_similarity(upgo)
+  fullGO_result <- simplifyGO(fullGO_mat, plot = F)
+  out.df$semantic_cluster <- fullGO_result$cluster
+  GOlist <- mapIds(org.Hs.eg.db, upgo, "ENTREZID", "GOALL", multiVals = "list")
+  simGO_mat <- term_similarity(GOlist, method = 'kappa')
+  kappa_result <- simplifyEnrichment(simGO_mat, plot = F)
+  out.df$kappa.cluster <- kappa_result$cluster
+  
+  out.df <- reorganise_up(out.df)}
+  
+  outall <- out.df
+  
+  out.df <- gfit_subset[gfit_subset$Ont == 'MF',]
+  
+  if(nrow(out.df) >1){upgo <- rownames(out.df)
+  
+  fullGO_mat <- GO_similarity(upgo)
+  fullGO_result <- simplifyGO(fullGO_mat, plot = F)
+  out.df$semantic_cluster <- fullGO_result$cluster
+  GOlist <- mapIds(org.Hs.eg.db, upgo, "ENTREZID", "GOALL", multiVals = "list")
+  simGO_mat <- term_similarity(GOlist, method = 'kappa')
+  kappa_result <- simplifyEnrichment(simGO_mat, plot = F)
+  out.df$kappa.cluster <- kappa_result$cluster
+  
+  out.df <- reorganise_up(out.df)}
+  
+  outall <- rbind(outall, out.df)
+  
+  out.df <- gfit_subset[gfit_subset$Ont == 'CC',]
+  
+  if(nrow(out.df) >1){upgo <- rownames(out.df)
+  
+  fullGO_mat <- GO_similarity(upgo)
+  fullGO_result <- simplifyGO(fullGO_mat, plot = F)
+  out.df$semantic_cluster <- fullGO_result$cluster
+  GOlist <- mapIds(org.Hs.eg.db, upgo, "ENTREZID", "GOALL", multiVals = "list")
+  simGO_mat <- term_similarity(GOlist, method = 'kappa')
+  kappa_result <- simplifyEnrichment(simGO_mat, plot = F)
+  out.df$kappa.cluster <- kappa_result$cluster
+  
+  out.df <- reorganise_up(out.df)}
+  
+  outall <- rbind(outall, out.df)
+  
+  return(outall)}
+
+
+
+write.xlsx(goana_output(gfit_GBM_Ki67_pos_v_neg_T, up = T), 'out/gfit_GBM_Ki67_pos_v_neg_T.xlsx', sheetName = 'Up')
+write.xlsx(goana_output(gfit_GBM_Ki67_pos_v_neg_T, up = F),'out/gfit_GBM_Ki67_pos_v_neg_T.xlsx', sheetName = 'Down', append = TRUE)
+
+write.xlsx(goana_output(gfit_A_Ki67_pos_v_neg_T, up = T), 'out/gfit_A_Ki67_pos_v_neg_T.xlsx', sheetName = 'Up')
+write.xlsx(goana_output(gfit_A_Ki67_pos_v_neg_T, up = F),'out/gfit_A_Ki67_pos_v_neg_T.xlsx', sheetName = 'Down', append = TRUE)
+
+write.xlsx(goana_output(gfit_GBM_tumourvsborder_T, up = T), 'out/gfit_GBM_tumourvsborder_T.xlsx', sheetName = 'Up')
+write.xlsx(goana_output(gfit_GBM_tumourvsborder_T, up = F),'out/gfit_GBM_tumourvsborder_T.xlsx', sheetName = 'Down', append = TRUE)
+
+write.xlsx(goana_output(gfit_A_tumourvsborder_T, up = T), 'out/gfit_A_tumourvsborder_T.xlsx', sheetName = 'Up')
+write.xlsx(goana_output(gfit_A_tumourvsborder_T, up = F),'out/gfit_A_tumourvsborder_T.xlsx', sheetName = 'Down', append = TRUE)
+
+write.xlsx(goana_output(gfit_GBM_highvslow_T, up = T), 'out/gfit_GBM_highvslow_T.xlsx', sheetName = 'Up')
+write.xlsx(goana_output(gfit_GBM_highvslow_T, up = F),'out/gfit_GBM_highvslow_T.xlsx', sheetName = 'Down', append = TRUE)
+
+write.xlsx(goana_output(gfit_A_highvslow_T, up = T), 'out/gfit_A_highvslow_T.xlsx', sheetName = 'Up')
+write.xlsx(goana_output(gfit_A_highvslow_T, up = F),'out/gfit_A_highvslow_T.xlsx', sheetName = 'Down', append = TRUE)
+ 
+
+
+write.xlsx(goana_output(gfit_GBM_normal_border_T, up = T), 'out/gfit_GBM_normal_border_T.xlsx', sheetName = 'Up')
+write.xlsx(goana_output(gfit_GBM_normal_border_T, up = F),'out/gfit_GBM_normal_border_T.xlsx', sheetName = 'Down', append = TRUE)
+
+write.xlsx(goana_output(gfit_A_normal_border_T, up = T), 'out/gfit_A_normal_border_T.xlsx', sheetName = 'Up')
+write.xlsx(goana_output(gfit_A_normal_border_T, up = F),'out/gfit_A_normal_border_T.xlsx', sheetName = 'Down', append = TRUE)
+
+
+write.xlsx(goana_output(gfit_GBMedgevsoutside_T, up = T), 'out/gfit_GBMedgevsoutside_T.xlsx', sheetName = 'Up')
+write.xlsx(goana_output(gfit_GBMedgevsoutside_T, up = F),'out/gfit_GBMedgevsoutside_T.xlsx', sheetName = 'Down', append = TRUE)
+
+write.xlsx(goana_output(gfit_GBMtumorvsoutside_T, up = T), 'out/gfit_GBMtumorvsoutside_T.xlsx', sheetName = 'Up')
+write.xlsx(goana_output(gfit_GBMtumorvsoutside_T, up = F),'out/gfit_GBMtumorvsoutside_T.xlsx', sheetName = 'Down', append = TRUE)
+
+write.xlsx(goana_output(gfit_GBMtumorvsedge_T, up = T), 'out/gfit_GBMtumorvsedge_T.xlsx', sheetName = 'Up')
+write.xlsx(goana_output(gfit_GBMtumorvsedge_T, up = F),'out/gfit_GBMtumorvsedge_T.xlsx', sheetName = 'Down', append = TRUE)
+
+
+write.xlsx(goana_output(gfit_AOvsA_T, up = T), 'out/gfit_AOvsA_T.xlsx', sheetName = 'Up')
+write.xlsx(goana_output(gfit_AOvsA_T, up = F),'out/gfit_AOvsA_T.xlsx', sheetName = 'Down', append = TRUE)
+
+
+write.xlsx(goana_output(gfit_AvsGBM_T, up = T), 'out/gfit_AvsGBM_T.xlsx', sheetName = 'Up')
+write.xlsx(goana_output(gfit_AvsGBM_T, up = F),'out/gfit_AvsGBM_T.xlsx', sheetName = 'Down', append = TRUE)
+
+```
+
+
+
+
+
+
+
+
+
+
+```{r}
+AOvA <- read.xlsx('out/gfit_AOvsA_T.xlsx', sheetName = 'Up')
+AOvA$UP.p.adjust.fdr <- as.numeric(AOvA$UP.p.adjust.fdr)
+AOvA$group <- factor(AOvA$group, levels = unique(AOvA$group))
+AOvA <- AOvA[AOvA$group %in% names(which(summary(AOvA$group)>1)),]
+AOvA$Ont <- factor(AOvA$Ont, levels = c('CC', 'MF', 'BP'))
+ggplot(AOvA, aes(group, -log10(UP.p.adjust.fdr), col = Ont)) + 
+  geom_point(size =2) + coord_flip() + 
+  scale_color_manual(name = 'Ontology', values =c('#3DE0C7', '#E7974E', '#6BD76D'),
+                     labels = c('Cellular Component','Molecular Function', 'Biological Process')) +
+  theme_minimal() + geom_hline(yintercept = -log10(0.05), linetype = 2, col = 'grey') + 
+  geom_label_repel(data = subset(AOvA, nchar(label) >1), label =subset(AOvA, nchar(label) >1)$label,
+                   size = 3, col = 'black', segment.size =0.4, nudge_x = 0.5)+ 
+  ggtitle('Upregulated GO terms in AO vs A') + xlab('Semantic Cluster') + ylab('-log10(adjusted P value)')
+
+ggsave('out_figures/GO_plot_AOvA.png', width = 10, height = 6, bg = 'white')
+
+
+```
+

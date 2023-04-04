@@ -1,0 +1,423 @@
+---
+title: "1_preprocessing"
+author: "Joel Moffet"
+date: "2023-03-21"
+output: html_document
+---
+
+take matrices from Nanostring Excel files, including LOQ values for each AOI (found on the segment properties sheet)
+
+```{r, setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '~/R/Spatial_Decon/')
+
+library(SpatialExperiment)
+library(stringr)
+library(scater)
+library(standR)
+library(Seurat)
+library(KEGGREST)
+```
+
+
+```{r - LOQ QC}
+
+pilot_raw_counts <-  as.matrix(read.csv('data/TargetCountMatrix.csv', row.names =1))
+nano_22_raw_counts <- as.matrix(read.csv('data/Nano_22_raw_counts.csv', row.names = 1))
+combined_raw_counts <-  cbind(pilot_raw_counts, nano_22_raw_counts)
+
+pilot_properties <- as.matrix(read.csv('data/Pilot_segments.csv'))
+nano_22_properties <- as.matrix(read.csv('data/Segment_Properties.csv'))
+                                
+pilot_LOQ <- pilot_properties[,'LOQ_01']
+nano_22_LOQ <- nano_22_properties[,'LOQ..Human.NGS.Whole.Transcriptome.Atlas.RNA_1.0.']
+combined_LOQ <- as.numeric(c(pilot_LOQ, nano_22_LOQ))
+```
+
+
+```{r - nuc_spe}
+#Removing low nuclei counts and normalising remaining samples
+
+nuc_resultmatrix <- combined_raw_counts
+
+for(i in 1:71){nuc_resultmatrix[,i] <- combined_raw_counts[,i] > combined_LOQ[i]}
+
+combined_spatdat <- readRDS('data/Combined_SpatialData.RDS')
+nuc_resultmatrix <- nuc_resultmatrix[,combined_spatdat$AOINucleiCount>100]
+
+nuc_out_QC <- rownames(nuc_resultmatrix[rowSums(nuc_resultmatrix)>0.05*64,])   #checks whether each gene is above LOQ in at least 5% of the AOIs, otherwise filtered out.
+nuc_out_QC <- c(nuc_out_QC, 'NegProbe-WTX')
+
+nuc_combined_target_counts <-  combined_raw_counts
+nuc_combined_target_counts <- nuc_combined_target_counts[,combined_spatdat$AOINucleiCount>100]
+nuc_combined_target_counts <-  nuc_combined_target_counts[nuc_out_QC,]
+
+nuc_upper75 <- c()
+for(i in 1:length(colnames(nuc_combined_target_counts))){nuc_upper75[i] <- (quantile(nuc_combined_target_counts[,i], 0.75))}
+nuc_combined_norm_counts <- nuc_combined_target_counts
+for(i in 1:length(colnames(nuc_combined_target_counts))){nuc_combined_norm_counts[,i] = nuc_combined_target_counts[,i]/nuc_upper75[i]}    #divide each AOI by its third quartile expression level
+nuc_geomean <-  exp(mean(log(nuc_upper75)))        #the geometric mean of all 3rd quartile counts  
+nuc_combined_norm_counts <- nuc_combined_norm_counts*nuc_geomean
+
+nuc_combined_norm_counts[1:10, 1:5]
+
+
+nuc_spe <- SpatialExperiment(nuc_combined_norm_counts)
+names(assays(nuc_spe)) <- 'Q3normcounts'
+counts(nuc_spe) <- nuc_combined_target_counts
+logcounts(nuc_spe) <- log(counts(nuc_spe))
+assay(nuc_spe, 'Q3normlogcounts') <- log(assay(nuc_spe, 'Q3normcounts'))
+
+
+```
+
+
+```{r - Annotations}
+
+#ROI Type
+
+nuc_spe$ROI_Type <- colnames(nuc_spe)
+nuc_spe$ROI_Type <- gsub('.*CD45', 'CD45', nuc_spe$ROI_Type)
+nuc_spe$ROI_Type <- gsub('.*Ki67.*', 'Ki67', nuc_spe$ROI_Type)
+nuc_spe$ROI_Type <- gsub('.*tumor', 'tumor', nuc_spe$ROI_Type)
+
+
+#Sample
+
+nuc_spe$Sample <- colnames(nuc_spe)
+nuc_spe$Sample <- gsub('X', '', nuc_spe$Sample)
+nuc_spe$Sample <- gsub('.', '', nuc_spe$Sample, fixed = TRUE)
+nuc_spe$Sample <- gsub('JJ93.*', 'JJ93 A', nuc_spe$Sample)
+nuc_spe$Sample <- gsub('JJ98.*', 'JJ98 GBM', nuc_spe$Sample)
+nuc_spe$Sample <- gsub('22B2905_2_1.*', '22B2905_2_1 GBM', nuc_spe$Sample)
+nuc_spe$Sample <- gsub('19B10550_1_1.*', '19B10550_1_1 A', nuc_spe$Sample)
+nuc_spe$Sample <- gsub('20B1997_2_1.*', '20B1997_2_1 A', nuc_spe$Sample)
+nuc_spe$Sample <- gsub('22B502_2_1.*', '22B502_2_1 GBM', nuc_spe$Sample)
+
+#simplified IDs
+
+nuc_spe$ID_simple <- colnames(nuc_spe)
+nuc_spe$ID_simple <- gsub('JJ93...00', 'A_1.', nuc_spe$ID_simple, fixed = TRUE)
+nuc_spe$ID_simple <- gsub('JJ98...00', 'GBM_1.', nuc_spe$ID_simple, fixed = TRUE)
+nuc_spe$ID_simple <- gsub('X19B10550_1_1.00', 'A_2.', nuc_spe$ID_simple, fixed = TRUE)
+nuc_spe$ID_simple <- gsub('X20B1997_2_1.00', 'A_3.', nuc_spe$ID_simple, fixed = TRUE)
+nuc_spe$ID_simple <- gsub('X22B2905_2_1.00', 'GBM_2.', nuc_spe$ID_simple, fixed = TRUE)
+nuc_spe$ID_simple <- gsub('X22B502_2_1.00', 'GBM_3.', nuc_spe$ID_simple, fixed = TRUE)
+nuc_spe$ID_simple <- gsub('tumor', 'T', nuc_spe$ID_simple, fixed = TRUE)
+nuc_spe$ID_simple <- gsub('Ki67..T', 'K', nuc_spe$ID_simple, fixed = TRUE)
+nuc_spe$ID_simple <- gsub('CD45', 'I', nuc_spe$ID_simple, fixed = TRUE)
+nuc_spe$ID_simple <- gsub('...', '.', nuc_spe$ID_simple, fixed = TRUE)
+
+nuc_spe$Region <- substring(nuc_spe$ID_simple, first =1, last = nchar(nuc_spe$ID_simple)-2)
+nuc_spe$ID_Sample <- substring(nuc_spe$Region, first =1, last = nchar(nuc_spe$Region)-2)
+nuc_spe$class <- substring(nuc_spe$ID_Sample, first =1, last = nchar(nuc_spe$ID_Sample)-2)
+
+nuc_spe$Sex <- nuc_spe$ID_Sample
+for(i in 1:length(nuc_spe$Sex)){nuc_spe$Sex[i] <- ifelse(nuc_spe$Sex[i] %in% c('A_1', 'A_2'), 'F', 'M')}
+
+nuc_spe$Batch <- colnames(nuc_spe)
+nuc_spe$Batch <- ifelse(nuc_spe$ID_Sample %in% c('A_1', 'GBM_1'), 'Pilot', 'Nano_22')
+
+
+#Library size 
+nuc_spe$lib_size <- as.integer(c(pilot_properties[,'AlignedReads'], nano_22_properties[,'AlignedReads']))[which(colnames(combined_raw_counts) %in% colnames(nuc_spe))]
+
+#DEG comparisons
+
+nuc_spe$GFAPpos_Ki67 <- colnames(nuc_spe)
+nuc_spe$GFAPpos_Ki67[c(1,2,5,22,25,28,30,34,36,38)] <- 'A.positive'
+nuc_spe$GFAPpos_Ki67[c(4,7,8,23,27,29)] <- 'A'
+nuc_spe$GFAPpos_Ki67[c(3,6,9,24,26,31,32,33,35,37)] <- 'A.negative'
+nuc_spe$GFAPpos_Ki67[c(10,13,16,40,45,49,54,60,64)] <- 'GBM.positive'
+nuc_spe$GFAPpos_Ki67[c(12,15,18,19,20,21,39,42,44,46,48,51,53,55,57,59,61,62,63)] <- 'GBM'
+nuc_spe$GFAPpos_Ki67[c(11,14,17,41,43,47,50,52,56,58)] <-'GBM.negative'
+
+nuc_spe$immune_border <- colnames(nuc_spe)
+nuc_spe$immune_border[c(10,11,13,14,16,17,19,20,21,40,41,43,45,47,49,50,52,54,56,58,60,62,64)] <- 'GBM'
+nuc_spe$immune_border[c(1,2,3,5,6,7,9,22,24,25,26,28,30,31,32,33,34,35,36,37,38)] <- 'A'
+nuc_spe$immune_border[c(42,46,51,55,57,61)] <- 'GBM.outside'
+nuc_spe$immune_border[c(39,44,48,53,59,63)] <- 'GBM.edge'
+nuc_spe$immune_border[c(12,15,18)] <- 'GBM.tumour'
+nuc_spe$immune_border[c(23)] <- 'A.outside'
+nuc_spe$immune_border[c(27)] <- 'A.edge'
+nuc_spe$immune_border[c(4,8,29)] <- 'A.tumour'
+
+nuc_spatdat <- combined_spatdat[combined_spatdat$ID %in% colnames(nuc_spe),]
+nuc_spe$AOINucleiCount <- nuc_spatdat$AOINucleiCount
+
+
+
+classification <- nuc_spe$ID_simple
+
+classification[str_detect(classification, 'GBM_3.6') | str_detect(classification, 'GBM_1.6')] <- 'Normal'
+
+classification[str_detect(classification, 'GBM_3.4') | str_detect(classification, 'GBM_1.5') | 
+                 str_detect(classification, 'GBM_2.3') | str_detect(classification, 'GBM_2.5') | 
+                 str_detect(classification, 'GBM_3.1') | str_detect(classification, 'GBM_3.3') |
+                 str_detect(classification, 'A_1.5') | str_detect(classification, 'A_2.2') |
+                 str_detect(classification, 'A_2.4') | str_detect(classification, 'A_3.1')] <- 'Ki67- Border'
+
+classification[str_detect(classification, 'GBM_1.1') | str_detect(classification, 'GBM_1.2') | 
+                 str_detect(classification, 'GBM_1.3') | str_detect(classification, 'A_1.2') | 
+                 str_detect(classification, 'A_1.3') | str_detect(classification, 'A_1.4') | 
+                 str_detect(classification, 'A_2.6')] <- 'Tumour'
+
+classification[str_detect(classification, '_')] <- 'Border'
+
+nuc_spe$Classification <- classification
+
+
+infiltration <- nuc_spe$ID_simple
+
+infiltration[str_detect(infiltration, 'A_1.2') | str_detect(infiltration, 'A_1.3') | 
+                 str_detect(infiltration, 'A_1.4') | str_detect(infiltration, 'A_2.6') | 
+                 str_detect(infiltration, 'A_3.2') | str_detect(infiltration, 'A_3.3') |
+                 str_detect(infiltration, 'A_3.4') | str_detect(infiltration, 'GBM_1.1') |
+                 str_detect(infiltration, 'GBM_1.2') | str_detect(infiltration, 'GBM_1.3') | 
+                 str_detect(infiltration, 'GBM_2.4') | str_detect(infiltration, 'GBM_2.5') | 
+                 str_detect(infiltration, 'GBM_3.4') | str_detect(infiltration, 'GBM_3.5') |
+                 str_detect(infiltration, 'GBM_3.6')] <- 'High'
+
+infiltration[str_detect(infiltration, '_')] <- 'Low'
+
+nuc_spe$Infiltration <- infiltration
+
+
+
+IVYGAP <- nuc_spe$ID_simple
+
+IVYGAP[str_detect(IVYGAP, 'A_2.4') | str_detect(IVYGAP, 'A_3.3') | 
+         str_detect(IVYGAP, 'A_3.4') | str_detect(IVYGAP, 'GBM_1.5') | 
+         str_detect(IVYGAP, 'GBM_2.3')] <- 'Infiltrating Tumour'
+
+IVYGAP[str_detect(IVYGAP, 'A_3.2') | str_detect(IVYGAP, 'GBM_1.6')] <- 'Tumour Leading Edge'
+
+IVYGAP[str_detect(IVYGAP, 'GBM_3.1') | str_detect(IVYGAP, 'GBM_3.4')] <-  'Pseudo-palisading cells Around the Necrosis'
+
+IVYGAP[str_detect(IVYGAP, 'GBM_1.1')] <-  'Cellular Tumour + Microvascular Proliferation'
+
+IVYGAP[str_detect(IVYGAP, 'GBM_3.3')] <-  'Perinecrotic Zone'
+
+IVYGAP[str_detect(IVYGAP, 'GBM_3.6')] <-  'Necrosis'
+
+IVYGAP[str_detect(IVYGAP, '_')] <- 'Cellular Tumour'
+
+nuc_spe$IVYGAP <- IVYGAP
+
+
+colnames(nuc_spe) <- nuc_spe$ID_simple
+
+nuc_spe$Ki67 <- gsub('A.', '', nuc_spe$GFAPpos_Ki67, fixed = T)
+nuc_spe$Ki67 <- gsub('GBM.', '', nuc_spe$Ki67, fixed = T)
+nuc_spe$Ki67 <- gsub('GBM', 'non', nuc_spe$Ki67, fixed = T)
+nuc_spe$Ki67 <- gsub('A', 'non', nuc_spe$Ki67, fixed = T)
+
+```
+
+```{r - com_spe and extra annotations}
+colnames(nuc_combined_target_counts) <- nuc_spe$ID_simple
+com_target_counts <- nuc_combined_target_counts
+for(i in nuc_spe$Region){if(paste0(i,'.T') %in% nuc_spe$ID_simple & paste0(i,'.K') %in% nuc_spe$ID_simple){com_target_counts[,paste0(i, '.T')] = com_target_counts[,paste0(i, '.T')] +com_target_counts[,paste0(i, '.K')]}}
+com_target_counts <- com_target_counts[,!(str_detect(colnames(com_target_counts), 'K'))]
+
+
+com_upper75 <- c()
+for(i in 1:length(colnames(com_target_counts))){com_upper75[i] <- (quantile(com_target_counts[,i], 0.75))}
+com_norm_counts <- com_target_counts
+for(i in 1:length(colnames(com_target_counts))){com_norm_counts[,i] = com_target_counts[,i]/com_upper75[i]}    #divide each AOI by its third quartile expression level
+com_geomean <-  exp(mean(log(com_upper75)))        #the geometric mean of all 3rd quartile counts  
+com_norm_counts <- com_norm_counts*com_geomean
+
+com_norm_counts[1:10, 1:5]
+
+
+com_spe <- SpatialExperiment(com_norm_counts)
+names(assays(com_spe)) <- 'Q3normcounts'
+counts(com_spe) <- com_target_counts
+logcounts(com_spe) <- log(counts(com_spe))
+assay(com_spe, 'Q3normlogcounts') <- log(assay(com_spe, 'Q3normcounts'))
+
+colData(com_spe) <- colData(nuc_spe[,nuc_spe$ID_simple %in% colnames(com_spe)])
+
+com_spe$infiltration <- colnames(com_spe)
+com_spe$infiltration[c(9,11,13,15,16,31,33,35,37,39,41,43,45,47,49,51,53)] <- 'GBM'
+com_spe$infiltration[c(3,6,18,22,24,27)] <- 'A'
+com_spe$infiltration[c(14,32,34,40,42,44,46,54)] <- 'GBM.low'
+com_spe$infiltration[c(8,10,12,36,38,48,50,52)] <- 'GBM.high'
+com_spe$infiltration[c(1,7,17,19,20,21,23,26,30)] <- 'A.low'
+com_spe$infiltration[c(2,4,5,25,28,29)] <- 'A.high'
+
+com_spe$proliferative_border <- colnames(com_spe)
+com_spe$proliferative_border[c(9,11,13,14,15,16,31,33,34,35,37,38,39,41,42,43,45,46,47,48,49,51,52,53)] <- 'GBM'
+com_spe$proliferative_border[c(3,6,7,18,19,21,22,24,26,27)] <- 'A'
+com_spe$proliferative_border[c(8,10,12)] <- 'GBM.tumour'
+com_spe$proliferative_border[c(32,36,40,44,50,54)] <- 'GBM.border'
+com_spe$proliferative_border[c(2,4,5,25)] <- 'A.tumour'
+com_spe$proliferative_border[c(1,17,20,23,28,29,30)] <- 'A.border'
+
+com_spe$normal_border <- colnames(com_spe)
+com_spe$normal_border[c(8,9,10,11,12,13,14,31,33,35,37,38,39,41,42,43,45,46,47,48,49,51,53)] <- 'GBM'
+com_spe$normal_border[c(1,2,3,4,5,6,7,17,18,19,22,23,24,25,26,30)] <- 'A'
+com_spe$normal_border[c(15,16,34,52)] <- 'GBM.normal'
+com_spe$normal_border[c(32,36,40,44,50,54)] <- 'GBM.border'
+com_spe$normal_border[c(21,27)] <- 'A.normal'
+com_spe$normal_border[c(20,28,29)] <- 'A.border'
+
+com_spe$immune <- com_spe$immune_border
+com_spe$immune <- gsub('A.', '', fixed = T, com_spe$immune)
+com_spe$immune <- gsub('GBM.', '', fixed = T, com_spe$immune)
+com_spe$immune <- gsub('A', 'non', fixed = T, com_spe$immune)
+com_spe$immune <- gsub('GBM', 'non', fixed = T, com_spe$immune)
+
+
+nuc_AOINucleiCount <- nuc_spe$AOINucleiCount
+names(nuc_AOINucleiCount) <- nuc_spe$ID_simple
+com_AOINucleiCount <- nuc_AOINucleiCount
+for(i in 2:length(com_AOINucleiCount)){if(str_detect(names(com_AOINucleiCount)[i-1], 'K') ){com_AOINucleiCount[i] <- nuc_AOINucleiCount[i] +nuc_AOINucleiCount[i-1] }}
+com_AOINucleiCount <- com_AOINucleiCount[colnames(nuc_spe) %in% colnames(com_spe)]
+com_spe$AOINucleiCount <- com_AOINucleiCount
+
+nuc_lib_size <- nuc_spe$lib_size
+names(nuc_lib_size) <- nuc_spe$ID_simple
+com_lib_size <- nuc_lib_size
+for(i in 2:length(com_lib_size)){if(str_detect(names(com_lib_size)[i-1], 'K') ){com_lib_size[i] <- nuc_lib_size[i] +nuc_lib_size[i-1] }}
+com_lib_size <- com_lib_size[colnames(nuc_spe) %in% colnames(com_spe)]
+com_spe$lib_size <- com_lib_size
+
+
+
+```
+
+
+```{r - nuc Limma batch correction}
+
+plotRLE(nuc_spe, exprs_values = 'counts', exprs_logged = FALSE, style ='full', colour_by = 'Sample')
+ggsave('out_figures/separated_rle_before.pdf', height = 7, width = 12)
+plotRLE(nuc_spe, exprs_values = 'Q3normcounts', exprs_logged = FALSE, style ='full', colour_by = 'Sample')
+ggsave('out_figures/separated_rle_after.pdf', height = 7, width = 12)
+
+plotRLE(com_spe, exprs_values = 'counts', exprs_logged = FALSE, style ='full', colour_by = 'Sample')
+ggsave('out_figures/combined_rle_before.pdf', height = 7, width = 12)
+plotRLE(com_spe, exprs_values = 'Q3normcounts', exprs_logged = FALSE, style ='full', colour_by = 'Sample')
+ggsave('out_figures/combined_rle_after.pdf', height = 7, width = 12)
+
+
+
+
+
+plotPairPCA(nuc_spe, assay =4, col = class, shape = Batch)
+ggsave('out_figures/pca_separated_batch.pdf', height = 7, width = 12, bg = 'white')
+plotPairPCA(nuc_spe, assay =4, col = ROI_Type == 'CD45', shape = Batch)
+ggsave('out_figures/pca_separated_imune_tumour.pdf', height = 7, width = 12, bg = 'white')
+
+
+drawPCA(nuc_spe[,nuc_spe$class =='GBM'], assay =4, col = ROI_Type, shape = ID_Sample, size = 4)
+ggsave('out_figures/pca_separated_GBM.pdf', height = 7, width = 12, bg = 'white')
+drawPCA(nuc_spe[,nuc_spe$class =='A'], assay =4, col = ROI_Type, shape = ID_Sample, size = 4)
+ggsave('out_figures/pca_separated_A.pdf', height = 7, width = 12, bg = 'white')
+
+
+
+
+tmp_spe_A <- geomxBatchCorrection(nuc_spe[,nuc_spe$class =='A'], n_assay =4, batch = colData(nuc_spe[,nuc_spe$class =='A'])$Batch, batch2 = colData(nuc_spe[,nuc_spe$class =='A'])$Sex, method = "Limma")
+tmp_spe_GBM <- geomxBatchCorrection(nuc_spe[,nuc_spe$class =='GBM'], n_assay =4, batch = colData(nuc_spe[,nuc_spe$class =='GBM'])$Batch, method = "Limma")
+
+tmp_spe <- cbind(tmp_spe_A, tmp_spe_GBM)[,colnames(nuc_spe)]
+
+assay(nuc_spe, 'logLimma') <- logcounts(tmp_spe)
+assay(nuc_spe, 'Limma') <- exp(assay(nuc_spe, 'logLimma'))
+
+drawPCA(nuc_spe, assay =5, col = class, shape = Batch, size = 4) +scale_color_manual(values = c('#1CD150', '#841CD1'))
+ggsave('out_figures/pca_limma_separated_batch.pdf', height = 7, width = 12, bg = 'white')
+plotPairPCA(nuc_spe, assay =5, col = ROI_Type == 'CD45', shape = Batch)
+ggsave('out_figures/pca_limma_separated_imune_tumour.pdf', height = 7, width = 12, bg = 'white')
+
+
+drawPCA(nuc_spe[,nuc_spe$class =='GBM'], assay =5, col = ROI_Type, shape = ID_Sample, size = 4)
+ggsave('out_figures/pca_limma_separated_GBM.pdf', height = 7, width = 12, bg = 'white')
+drawPCA(nuc_spe[,nuc_spe$class =='A'], assay =5, col = ROI_Type, shape = ID_Sample, size = 4)
+ggsave('out_figures/pca_limma_separated_A.pdf', height = 7, width = 12, bg = 'white')
+```
+
+
+```{r - com Limma batch correction}
+plotPairPCA(com_spe, assay =4, col = class, shape = Batch)
+ggsave('out_figures/pca_combined_batch.pdf', height = 7, width = 12, bg = 'white')
+plotPairPCA(com_spe, assay =4, col = ROI_Type, shape = Batch)
+ggsave('out_figures/pca_combined_imune_tumour.pdf', height = 7, width = 12, bg = 'white')
+
+
+drawPCA(com_spe[,com_spe$class =='GBM'], assay =4, col = ROI_Type, shape = ID_Sample, size = 4)
+ggsave('out_figures/pca_combined_GBM.pdf', height = 7, width = 12, bg = 'white')
+drawPCA(com_spe[,com_spe$class =='A'], assay =4, col = ROI_Type, shape = ID_Sample, size = 4)
+ggsave('out_figures/pca_combined_A.pdf', height = 7, width = 12, bg = 'white')
+
+
+
+
+tmp_spe_A <- geomxBatchCorrection(com_spe[,com_spe$class =='A'], n_assay =4, batch = colData(com_spe[,com_spe$class =='A'])$Batch, batch2 = colData(com_spe[,com_spe$class =='A'])$Sex, method = "Limma")
+tmp_spe_GBM <- geomxBatchCorrection(com_spe[,com_spe$class =='GBM'], n_assay =4, batch = colData(com_spe[,com_spe$class =='GBM'])$Batch, method = "Limma")
+
+tmp_spe <- cbind(tmp_spe_A, tmp_spe_GBM)[,colnames(com_spe)]
+
+assay(com_spe, 'logLimma') <- logcounts(tmp_spe)
+assay(com_spe, 'Limma') <- exp(assay(com_spe, 'logLimma'))
+
+drawPCA(com_spe, assay =5, col = class, shape = Batch, size = 4) +scale_color_manual(values = c('#1CD150', '#841CD1'))
+ggsave('out_figures/pca_limma_combined_batch.pdf', height = 7, width = 12, bg = 'white')
+plotPairPCA(com_spe, assay =5, col = ROI_Type, shape = Batch)
+ggsave('out_figures/pca_limma_combined_imune_tumour.pdf', height = 7, width = 12, bg = 'white')
+
+
+drawPCA(com_spe[,com_spe$class =='GBM'], assay =5, col = ROI_Type, shape = ID_Sample, size = 4)
+ggsave('out_figures/pca_limma_combined_GBM.pdf', height = 7, width = 12, bg = 'white')
+drawPCA(com_spe[,com_spe$class =='A'], assay =5, col = ROI_Type, shape = ID_Sample, size = 4)
+ggsave('out_figures/pca_limma_combined_A.pdf', height = 7, width = 12, bg = 'white')
+```
+
+
+```{r - cell cycle}
+
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+nuc_cc <- CreateSeuratObject(counts = assay(nuc_spe, 'Limma'))
+
+nuc_cc <- CellCycleScoring(nuc_cc, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+nuc_spe$Phase <- nuc_cc@meta.data$Phase
+
+com_cc <- CreateSeuratObject(counts = assay(com_spe, 'Limma'))
+com_cc <- CellCycleScoring(com_cc, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+
+com_spe$Phase <- com_cc@meta.data$Phase
+# view cell cycle scores and phase assignments
+
+```
+
+
+```{r - hypoxia and glycolysis signatures}
+names <-  keggGet('hsa04066')[[1]]$GENE
+namesodd <-  names[seq(0,length(names),2)]
+hypoxia <- gsub("\\;.*","",namesodd)
+
+names <-  keggGet('hsa00010')[[1]]$GENE
+namesodd <-  names[seq(0,length(names),2)]
+glycolysis <- gsub("\\;.*","",namesodd)
+
+
+nuc_spe$log2Hypoxia <- colSums(log2(assay(nuc_spe, 'Limma')[rownames(com_spe) %in% hypoxia,]))
+nuc_spe$log2Glycolysis <- colSums(log2(assay(nuc_spe, 'Limma')[rownames(com_spe) %in% glycolysis,]))
+
+com_spe$log2Hypoxia <- colSums(log2(assay(com_spe, 'Limma')[rownames(com_spe) %in% hypoxia,]))
+com_spe$log2Glycolysis <- colSums(log2(assay(com_spe, 'Limma')[rownames(com_spe) %in% glycolysis,]))
+
+```
+
+```{r - save spe objects}
+
+saveRDS(nuc_spe, 'out/nuc_spe.RDS')
+saveRDS(com_spe, 'out/com_spe.RDS')
+
+```
+
+
+

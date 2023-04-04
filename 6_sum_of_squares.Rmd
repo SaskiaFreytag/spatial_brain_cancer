@@ -1,0 +1,151 @@
+---
+title: "6_sum_of_squares"
+author: "Joel Moffet"
+date: "2023-03-29"
+output: html_document
+---
+
+```{r}
+library(stringr)
+library(ggplot2)
+library(ComplexHeatmap)
+library(circlize)
+
+com_spe <- readRDS('out/com_spe.RDS')
+num_mat <- readRDS('out/num_mat.RDS')
+chr <-  readRDS('out/chr.RDS')
+
+Identity <- com_spe$ID_Sample
+
+
+within <- numeric(nrow(num_mat))
+for(i in unique(Identity)){within <- within + rowSums((num_mat[,str_detect(colnames(num_mat), i)] -rowMeans(num_mat[,str_detect(colnames(num_mat), i)]))^2)}
+
+total <- rowSums((num_mat -rowMeans(num_mat))^2)
+
+A_1_bmean <- rowMeans(num_mat[,str_detect(colnames(num_mat), 'A_1')])
+A_2_bmean <- rowMeans(num_mat[,str_detect(colnames(num_mat), 'A_2')])
+A_3_bmean <- rowMeans(num_mat[,str_detect(colnames(num_mat), 'A_3')])
+GBM_1_bmean <- rowMeans(num_mat[,str_detect(colnames(num_mat), 'GBM_1')])
+GBM_2_bmean <- rowMeans(num_mat[,str_detect(colnames(num_mat), 'GBM_2')])
+GBM_3_bmean <- rowMeans(num_mat[,str_detect(colnames(num_mat), 'GBM_3')])
+meantotal <- rowMeans(num_mat)
+meantotal_GBM <- rowMeans(num_mat[,str_detect(colnames(num_mat), 'GBM')])
+meantotal_A <- rowMeans(num_mat[,str_detect(colnames(num_mat), 'A')])
+
+A_1_wmean <- rowSums((num_mat[,str_detect(colnames(num_mat), 'A_1')] -rowMeans(num_mat[,str_detect(colnames(num_mat), 'A_1')]))^2)
+A_2_wmean <- rowSums((num_mat[,str_detect(colnames(num_mat), 'A_2')] -rowMeans(num_mat[,str_detect(colnames(num_mat), 'A_2')]))^2)
+A_3_wmean <- rowSums((num_mat[,str_detect(colnames(num_mat), 'A_3')] -rowMeans(num_mat[,str_detect(colnames(num_mat), 'A_3')]))^2)
+GBM_1_wmean <- rowSums((num_mat[,str_detect(colnames(num_mat), 'GBM_1')] -rowMeans(num_mat[,str_detect(colnames(num_mat), 'GBM_1')]))^2)
+GBM_2_wmean <- rowSums((num_mat[,str_detect(colnames(num_mat), 'GBM_2')] -rowMeans(num_mat[,str_detect(colnames(num_mat), 'GBM_2')]))^2)
+GBM_3_wmean <- rowSums((num_mat[,str_detect(colnames(num_mat), 'GBM_3')] -rowMeans(num_mat[,str_detect(colnames(num_mat), 'GBM_3')]))^2)
+
+
+between <- 7*(A_1_bmean-meantotal)^2 + 7*(A_2_bmean-meantotal)^2 +7*(A_3_bmean-meantotal)^2  +9*(GBM_1_bmean-meantotal)^2  + 7*(GBM_2_bmean-meantotal)^2 + 7*(GBM_3_bmean-meantotal)^2  
+
+A_1_bmean_all <- 7*(A_1_bmean-meantotal)^2
+A_2_bmean_all <- 7*(A_2_bmean-meantotal)^2
+A_3_bmean_all <- 7*(A_3_bmean-meantotal)^2
+GBM_1_bmean_all <- 9*(GBM_1_bmean-meantotal)^2
+GBM_2_bmean_all <- 7*(GBM_2_bmean-meantotal)^2
+GBM_3_bmean_all <- 7*(GBM_3_bmean-meantotal)^2
+
+GBM_1_bmean_GBM <- 9*(GBM_1_bmean-meantotal_GBM)^2
+GBM_2_bmean_GBM <- 7*(GBM_2_bmean-meantotal_GBM)^2
+GBM_3_bmean_GBM <- 7*(GBM_3_bmean-meantotal_GBM)^2
+
+A_1_bmean_A <- 7*(A_1_bmean-meantotal_A)^2
+A_2_bmean_A <- 7*(A_2_bmean-meantotal_A)^2
+A_3_bmean_A <- 7*(A_3_bmean-meantotal_A)^2
+
+
+
+bmean_GBMs_all <- GBM_1_bmean_all + GBM_2_bmean_all + GBM_3_bmean_all
+bmean_As_all <- A_1_bmean_all + A_2_bmean_all + A_3_bmean_all
+
+bmean_GBMs <- GBM_1_bmean_GBM + GBM_2_bmean_GBM + GBM_3_bmean_GBM
+bmean_As <- A_1_bmean_A + A_2_bmean_A + A_3_bmean_A
+
+wmean_GBMs <- GBM_1_wmean +GBM_2_wmean+GBM_3_wmean
+wmean_As <- A_1_wmean + A_2_wmean+ A_3_wmean
+```
+
+
+
+
+```{r}
+
+
+df <- data.frame(wmean_GBMs = wmean_GBMs, bmean_GBMs = bmean_GBMs, wmean_As = wmean_As, bmean_As = bmean_As, chromosome = chr)
+
+
+ggplot(df, aes(x= 1:nrow(df), y=log2(wmean_GBMs+1), group_by = chromosome)) + geom_line(aes(y = 0), col = 'grey')+
+  geom_point(col = '#841CD1') + theme_classic() + 
+  geom_point(aes(y=-log2(bmean_GBMs+1)), col = '#841CD1')  + 
+  geom_line(aes(y = 3.5, col = chromosome), size =1) + geom_line(aes(y = -5, col = chromosome), size =1) + 
+  theme(axis.line.x=element_blank(),axis.text.x=element_blank(), axis.ticks.x = element_blank(), legend.position="none")+ xlab('') +
+  ylab('      <- Between                                               Within ->') +
+  scale_color_manual(values = c('chr1' = 'black', 'chr2' = 'grey',
+                                'chr3' = 'black', 'chr4' = 'grey',
+                                'chr5' = 'black', 'chr6' = 'grey',
+                                'chr7' = 'black', 'chr8' = 'grey',
+                                'chr9' = 'black', 'chr10' = 'grey',
+                                'chr11' = 'black', 'chr12' = 'grey',
+                                'chr13' = 'black', 'chr14' = 'grey',
+                                'chr15' = 'black', 'chr16' = 'grey',
+                                'chr17' = 'black', 'chr18' = 'grey',
+                                'chr19' = 'black', 'chr20' = 'grey',
+                                'chr21' = 'black', 'chr22' = 'grey'))
+
+ggsave('out_figures/GBM_summed_wbplot.png', width = 4500, height = 3000, units = 'px')
+
+
+ggplot(df, aes(x= 1:nrow(df), y=log2(wmean_As+1), group_by = chromosome)) + geom_line(aes(y = 0), col = 'grey')+
+  geom_point(col = '#1CD150') + theme_classic() + 
+  geom_point(aes(y=-log2(bmean_As+1)), col = '#1CD150')  + 
+  geom_line(aes(y = 3.5, col = chromosome), size =1) + geom_line(aes(y = -5, col = chromosome), size =1) + 
+  theme(axis.line.x=element_blank(),axis.text.x=element_blank(), axis.ticks.x = element_blank(), legend.position="none")+ xlab('') +
+  ylab('      <- Between                                               Within ->') +
+  scale_color_manual(values = c('chr1' = 'black', 'chr2' = 'grey',
+                                'chr3' = 'black', 'chr4' = 'grey',
+                                'chr5' = 'black', 'chr6' = 'grey',
+                                'chr7' = 'black', 'chr8' = 'grey',
+                                'chr9' = 'black', 'chr10' = 'grey',
+                                'chr11' = 'black', 'chr12' = 'grey',
+                                'chr13' = 'black', 'chr14' = 'grey',
+                                'chr15' = 'black', 'chr16' = 'grey',
+                                'chr17' = 'black', 'chr18' = 'grey',
+                                'chr19' = 'black', 'chr20' = 'grey',
+                                'chr21' = 'black', 'chr22' = 'grey'))
+
+ggsave('out_figures/A_summed_wbplot.png', width = 4500, height = 3000, units = 'px')
+
+bG <- -c(sum(GBM_1_bmean_GBM), sum(GBM_2_bmean_GBM),sum(GBM_3_bmean_GBM))
+wG <- c(sum(GBM_1_wmean),sum(GBM_2_wmean), sum(GBM_3_wmean))
+bA <- -c(sum(A_1_bmean_A), sum(A_2_bmean_A),sum(A_3_bmean_A))
+wA <- c(sum(A_1_wmean),sum(A_2_wmean), sum(A_3_wmean))
+
+
+pdf('out_figures/GBM_sample_heterogeneity.pdf', height = 10, width = 4)
+draw(HeatmapAnnotation('Within' = anno_barplot(wG, height = unit(200, 'pt'), bar_width = 1, gp =gpar(fill = rep(c('#DEA3F4'), 3))),
+'Between' = anno_barplot(bG, height = unit(200, 'pt'), bar_width = 1, ylim = c(-30000,0), axis_param = list(at =c(-10000, -20000,-30000), labels = c('-10000', '-20000', '-30000')), gp =gpar(fill = rep(c('#AB60C8'), 3)))) %v%
+HeatmapAnnotation(space = anno_text(c('\nGBM_1', '\nGBM_2', '\nGBM_3'), rot = 0, just = 'centre'), annotation_name_align = T))
+dev.off()
+pdf('out_figures/A_sample_heterogeneity.pdf', height = 10, width = 4)
+draw(HeatmapAnnotation('Within' = anno_barplot(wA, height = unit(200, 'pt'), bar_width = 1, ylim = c(0,30000), gp =gpar(fill = rep(c('#A7E989'), 3))),
+'Between' = anno_barplot(bA, height = unit(200, 'pt'), bar_width = 1, ylim = c(-30000,0), axis_param = list(at =c(-10000, -20000,-30000), labels = c('-10000', '-20000', '-30000')), gp =gpar(fill = rep(c('#81C860'), 3)))) %v%
+HeatmapAnnotation(space = anno_text(c('\nA_1', '\nA_2', '\nA_3'), rot = 0, just = 'centre'), annotation_name_align = T))
+dev.off()
+
+
+draw(HeatmapAnnotation('Within' = anno_barplot(wG, height = unit(200, 'pt'), bar_width = 1, gp =gpar(fill = rep(c('#DEA3F4'), 3))),
+'Between' = anno_barplot(bG, height = unit(200, 'pt'), bar_width = 1, ylim = c(-30000,0), axis_param = list(at =c(-10000, -20000,-30000), labels = c('-10000', '-20000', '-30000')), gp =gpar(fill = rep(c('#AB60C8'), 3)))) %v%
+HeatmapAnnotation(space = anno_text(c('\nGBM_1', '\nGBM_2', '\nGBM_3'), rot = 0, just = 'centre'), annotation_name_align = T))
+
+
+draw(HeatmapAnnotation('Within' = anno_barplot(wA, height = unit(200, 'pt'), bar_width = 1, ylim = c(0,30000), gp =gpar(fill = rep(c('#A7E989'), 3))),
+'Between' = anno_barplot(bA, height = unit(200, 'pt'), bar_width = 1, ylim = c(-30000,0), axis_param = list(at =c(-10000, -20000,-30000), labels = c('-10000', '-20000', '-30000')), gp =gpar(fill = rep(c('#81C860'), 3)))) %v%
+HeatmapAnnotation(space = anno_text(c('\nA_1', '\nA_2', '\nA_3'), rot = 0, just = 'centre'), annotation_name_align = T))
+
+```
+

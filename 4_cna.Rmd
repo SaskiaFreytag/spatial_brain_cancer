@@ -1,0 +1,582 @@
+---
+title: "4_cna"
+author: "Joel Moffet"
+date: "2023-03-21"
+output: html_document
+---
+
+
+ensembl gene info from cnvkit, cna data for correlations from cBioPortal: 
+
+type_of_cancer: gbm
+cancer_study_identifier: gbm_tcga
+name: Glioblastoma Multiforme (TCGA, Firehose Legacy)
+short_name: GBM (TCGA)
+description: TCGA Glioblastoma Multiforme. Source data from <A HREF="http://gdac.broadinstitute.org/runs/stddata__2016_01_28/data/GBM/20160128/">GDAC Firehose</A>. Previously known as TCGA Provisional.
+groups: PUBLIC
+
+
+```{r -  prepare ensembl files}
+library(dplyr)
+library("org.Hs.eg.db")
+library(stringr)
+#remove ensembl gene info not mapping to chromosomes
+
+ensembl <- read.csv('data/ensembl-gene-info.hg38.tsv', sep = '\t')
+newsembl <- ensembl[nchar(ensembl$Chromosome.scaffold.name)<3,]
+write.table(newsembl, sep = '\t', 'data/cnvkit/newsembl.tsv')
+
+com_spe <- readRDS('out/com_spe.RDS')
+nuc_spe <- readRDS('out/nuc_spe.RDS')
+
+rowData(com_spe)$Ensembl <- mapIds(org.Hs.eg.db, keys = rownames(com_spe), keytype = "SYMBOL", column="ENSEMBL")
+comsembl <- com_spe[!(isNA(rowData(com_spe)$Ensembl)),]
+rowData(com_spe)$Symbol <- rownames(com_spe)
+rowData(comsembl)$Symbol <- rownames(comsembl)
+
+rowData(nuc_spe)$Ensembl <- mapIds(org.Hs.eg.db, keys = rownames(nuc_spe), keytype = "SYMBOL", column="ENSEMBL")
+nucsembl <- nuc_spe[!(isNA(rowData(nuc_spe)$Ensembl)),]
+rowData(nuc_spe)$Symbol <- rownames(nuc_spe)
+rowData(nucsembl)$Symbol <- rownames(nucsembl)
+rownames(nucsembl) <- rowData(nucsembl)$Ensembl
+rownames(comsembl) <- rowData(comsembl)$Ensembl
+
+
+colnames(nucsembl) <- gsub('.', '_', colnames(nucsembl), fixed =TRUE)
+colnames(comsembl) <- gsub('.', '_', colnames(comsembl), fixed =TRUE)
+
+
+
+for(i in colnames(nucsembl)){
+  write.table(counts(nucsembl[,i]), file = paste0('data/cnvkit/out/', i, '.txt'), row.names = TRUE, col.names = FALSE, quote = FALSE, sep = '\t')
+}
+
+
+
+```
+
+```{bash - start command line cnvkit}
+####COMMAND LINE / TERMINAL   - in cnvkit folder
+cd data/cnvkit
+
+module unload python
+module load python/3.7.0
+module load R/4.1.3
+
+cnv_expression_correlate.py ../data_cna.txt ../data_mrna_affymetrix_microarray.txt -o tcga-gbm.trial_cnv_expr_corr.tsv
+
+cnvkit.py import-rna -f counts -n out/*I.txt -o allsamples.txt -d out/allsamples/ out/*{T,K}.txt -g newsembl.tsv -c tcga-gbm.trial_cnv_expr_corr.tsv
+
+                      #format     #normal samples   #output file               #output directory           #input expression   #ensembl info      #cna gene correlations
+```
+
+```{bash - GBM segmenting - LONG CODE and LONG RUNTIME}
+
+#GBM_1 Tumor samples
+
+cnvkit.py segment out/allsamples/GBM_1_1_T.cnr -o out/allsamples/GBM_1_1_T.cns
+cnvkit.py scatter out/allsamples/GBM_1_1_T.cnr -s out/allsamples/GBM_1_1_T.cns -o  out/allsamples/GBM_1_1_T.png
+cnvkit.py segmetrics -s out/allsamples/GBM_1_1_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/GBM_1_1_T_segmetrics.cns out/allsamples/GBM_1_1_T.cnr
+
+cnvkit.py segment out/allsamples/GBM_1_2_T.cnr -o out/allsamples/GBM_1_2_T.cns
+cnvkit.py scatter out/allsamples/GBM_1_2_T.cnr -s out/allsamples/GBM_1_2_T.cns -o  out/allsamples/GBM_1_2_T.png
+cnvkit.py segmetrics -s out/allsamples/GBM_1_2_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/GBM_1_2_T_segmetrics.cns out/allsamples/GBM_1_2_T.cnr
+
+cnvkit.py segment out/allsamples/GBM_1_3_T.cnr -o out/allsamples/GBM_1_3_T.cns
+cnvkit.py scatter out/allsamples/GBM_1_3_T.cnr -s out/allsamples/GBM_1_3_T.cns -o  out/allsamples/GBM_1_3_T.png
+cnvkit.py segmetrics -s out/allsamples/GBM_1_3_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/GBM_1_3_T_segmetrics.cns out/allsamples/GBM_1_3_T.cnr
+
+cnvkit.py segment out/allsamples/GBM_1_1_K.cnr -o out/allsamples/GBM_1_1_K.cns
+cnvkit.py scatter out/allsamples/GBM_1_1_K.cnr -s out/allsamples/GBM_1_1_K.cns -o  out/allsamples/GBM_1_1_K.png
+cnvkit.py segmetrics -s out/allsamples/GBM_1_1_K.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/GBM_1_1_K_segmetrics.cns out/allsamples/GBM_1_1_K.cnr
+
+cnvkit.py segment out/allsamples/GBM_1_2_K.cnr -o out/allsamples/GBM_1_2_K.cns
+cnvkit.py scatter out/allsamples/GBM_1_2_K.cnr -s out/allsamples/GBM_1_2_K.cns -o  out/allsamples/GBM_1_2_K.png
+cnvkit.py segmetrics -s out/allsamples/GBM_1_2_K.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/GBM_1_2_K_segmetrics.cns out/allsamples/GBM_1_2_K.cnr
+
+cnvkit.py segment out/allsamples/GBM_1_3_K.cnr -o out/allsamples/GBM_1_3_K.cns
+cnvkit.py scatter out/allsamples/GBM_1_3_K.cnr -s out/allsamples/GBM_1_3_K.cns -o  out/allsamples/GBM_1_3_K.png
+cnvkit.py segmetrics -s out/allsamples/GBM_1_3_K.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/GBM_1_3_K_segmetrics.cns out/allsamples/GBM_1_3_K.cnr
+
+cnvkit.py segment out/allsamples/GBM_1_4_T.cnr -o out/allsamples/GBM_1_4_T.cns
+cnvkit.py scatter out/allsamples/GBM_1_4_T.cnr -s out/allsamples/GBM_1_4_T.cns -o  out/allsamples/GBM_1_4_T.png
+cnvkit.py segmetrics -s out/allsamples/GBM_1_4_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/GBM_1_4_T_segmetrics.cns out/allsamples/GBM_1_4_T.cnr
+
+cnvkit.py segment out/allsamples/GBM_1_5_T.cnr -o out/allsamples/GBM_1_5_T.cns
+cnvkit.py scatter out/allsamples/GBM_1_5_T.cnr -s out/allsamples/GBM_1_5_T.cns -o  out/allsamples/GBM_1_5_T.png
+cnvkit.py segmetrics -s out/allsamples/GBM_1_5_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/GBM_1_5_T_segmetrics.cns out/allsamples/GBM_1_5_T.cnr
+
+cnvkit.py segment out/allsamples/GBM_1_6_T.cnr -o out/allsamples/GBM_1_6_T.cns
+cnvkit.py scatter out/allsamples/GBM_1_6_T.cnr -s out/allsamples/GBM_1_6_T.cns -o  out/allsamples/GBM_1_6_T.png
+cnvkit.py segmetrics -s out/allsamples/GBM_1_6_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/GBM_1_6_T_segmetrics.cns out/allsamples/GBM_1_6_T.cnr
+
+
+
+
+
+#GBM_2 Tumor samples
+
+cnvkit.py segment out/allsamples/GBM_2_2_T.cnr -o out/allsamples/GBM_2_2_T.cns
+cnvkit.py scatter out/allsamples/GBM_2_2_T.cnr -s out/allsamples/GBM_2_2_T.cns -o  out/allsamples/GBM_2_2_T.png
+cnvkit.py segmetrics -s out/allsamples/GBM_2_2_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/GBM_2_2_T_segmetrics.cns out/allsamples/GBM_2_2_T.cnr
+
+cnvkit.py segment out/allsamples/GBM_2_2_K.cnr -o out/allsamples/GBM_2_2_K.cns
+cnvkit.py scatter out/allsamples/GBM_2_2_K.cnr -s out/allsamples/GBM_2_2_K.cns -o  out/allsamples/GBM_2_2_K.png
+cnvkit.py segmetrics -s out/allsamples/GBM_2_2_K.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/GBM_2_2_K_segmetrics.cns out/allsamples/GBM_2_2_K.cnr
+
+cnvkit.py segment out/allsamples/GBM_2_3_T.cnr -o out/allsamples/GBM_2_3_T.cns
+cnvkit.py scatter out/allsamples/GBM_2_3_T.cnr -s out/allsamples/GBM_2_3_T.cns -o  out/allsamples/GBM_2_3_T.png
+cnvkit.py segmetrics -s out/allsamples/GBM_2_3_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/GBM_2_3_T_segmetrics.cns out/allsamples/GBM_2_3_T.cnr
+
+cnvkit.py segment out/allsamples/GBM_2_4_T.cnr -o out/allsamples/GBM_2_4_T.cns
+cnvkit.py scatter out/allsamples/GBM_2_4_T.cnr -s out/allsamples/GBM_2_4_T.cns -o  out/allsamples/GBM_2_4_T.png
+cnvkit.py segmetrics -s out/allsamples/GBM_2_4_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/GBM_2_4_T_segmetrics.cns out/allsamples/GBM_2_4_T.cnr
+
+cnvkit.py segment out/allsamples/GBM_2_5_T.cnr -o out/allsamples/GBM_2_5_T.cns
+cnvkit.py scatter out/allsamples/GBM_2_5_T.cnr -s out/allsamples/GBM_2_5_T.cns -o  out/allsamples/GBM_2_5_T.png
+cnvkit.py segmetrics -s out/allsamples/GBM_2_5_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/GBM_2_5_T_segmetrics.cns out/allsamples/GBM_2_5_T.cnr
+
+cnvkit.py segment out/allsamples/GBM_2_6_T.cnr -o out/allsamples/GBM_2_6_T.cns
+cnvkit.py scatter out/allsamples/GBM_2_6_T.cnr -s out/allsamples/GBM_2_6_T.cns -o  out/allsamples/GBM_2_6_T.png
+cnvkit.py segmetrics -s out/allsamples/GBM_2_6_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/GBM_2_6_T_segmetrics.cns out/allsamples/GBM_2_6_T.cnr
+
+cnvkit.py segment out/allsamples/GBM_2_6_K.cnr -o out/allsamples/GBM_2_6_K.cns
+cnvkit.py scatter out/allsamples/GBM_2_6_K.cnr -s out/allsamples/GBM_2_6_K.cns -o  out/allsamples/GBM_2_6_K.png
+cnvkit.py segmetrics -s out/allsamples/GBM_2_6_K.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/GBM_2_6_K_segmetrics.cns out/allsamples/GBM_2_6_K.cnr
+
+
+
+#GBM_3 Tumor samples
+
+cnvkit.py segment out/allsamples/GBM_3_1_T.cnr -o out/allsamples/GBM_3_1_T.cns
+cnvkit.py scatter out/allsamples/GBM_3_1_T.cnr -s out/allsamples/GBM_3_1_T.cns -o  out/allsamples/GBM_3_1_T.png
+cnvkit.py segmetrics -s out/allsamples/GBM_3_1_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/GBM_3_1_T_segmetrics.cns out/allsamples/GBM_3_1_T.cnr
+
+cnvkit.py segment out/allsamples/GBM_3_2_T.cnr -o out/allsamples/GBM_3_2_T.cns
+cnvkit.py scatter out/allsamples/GBM_3_2_T.cnr -s out/allsamples/GBM_3_2_T.cns -o  out/allsamples/GBM_3_2_T.png
+cnvkit.py segmetrics -s out/allsamples/GBM_3_2_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/GBM_3_2_T_segmetrics.cns out/allsamples/GBM_3_2_T.cnr
+
+cnvkit.py segment out/allsamples/GBM_3_3_T.cnr -o out/allsamples/GBM_3_3_T.cns
+cnvkit.py scatter out/allsamples/GBM_3_3_T.cnr -s out/allsamples/GBM_3_3_T.cns -o  out/allsamples/GBM_3_3_T.png
+cnvkit.py segmetrics -s out/allsamples/GBM_3_3_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/GBM_3_3_T_segmetrics.cns out/allsamples/GBM_3_3_T.cnr
+
+cnvkit.py segment out/allsamples/GBM_3_4_T.cnr -o out/allsamples/GBM_3_4_T.cns
+cnvkit.py scatter out/allsamples/GBM_3_4_T.cnr -s out/allsamples/GBM_3_4_T.cns -o  out/allsamples/GBM_3_4_T.png
+cnvkit.py segmetrics -s out/allsamples/GBM_3_4_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/GBM_3_4_T_segmetrics.cns out/allsamples/GBM_3_4_T.cnr
+
+cnvkit.py segment out/allsamples/GBM_3_5_T.cnr -o out/allsamples/GBM_3_5_T.cns
+cnvkit.py scatter out/allsamples/GBM_3_5_T.cnr -s out/allsamples/GBM_3_5_T.cns -o  out/allsamples/GBM_3_5_T.png
+cnvkit.py segmetrics -s out/allsamples/GBM_3_5_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/GBM_3_5_T_segmetrics.cns out/allsamples/GBM_3_5_T.cnr
+
+cnvkit.py segment out/allsamples/GBM_3_6_T.cnr -o out/allsamples/GBM_3_6_T.cns
+cnvkit.py scatter out/allsamples/GBM_3_6_T.cnr -s out/allsamples/GBM_3_6_T.cns -o  out/allsamples/GBM_3_6_T.png
+cnvkit.py segmetrics -s out/allsamples/GBM_3_6_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/GBM_3_6_T_segmetrics.cns out/allsamples/GBM_3_6_T.cnr
+
+cnvkit.py segment out/allsamples/GBM_3_7_T.cnr -o out/allsamples/GBM_3_7_T.cns
+cnvkit.py scatter out/allsamples/GBM_3_7_T.cnr -s out/allsamples/GBM_3_7_T.cns -o  out/allsamples/GBM_3_7_T.png
+cnvkit.py segmetrics -s out/allsamples/GBM_3_7_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/GBM_3_7_T_segmetrics.cns out/allsamples/GBM_3_7_T.cnr
+```
+
+```{bash}
+
+#A_1 Tumor samples
+
+cnvkit.py segment out/allsamples/A_1_1_T.cnr -o out/allsamples/A_1_1_T.cns
+cnvkit.py scatter out/allsamples/A_1_1_T.cnr -s out/allsamples/A_1_1_T.cns -o  out/allsamples/A_1_1_T.png
+cnvkit.py segmetrics -s out/allsamples/A_1_1_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/A_1_1_T_segmetrics.cns out/allsamples/A_1_1_T.cnr
+
+cnvkit.py segment out/allsamples/A_1_2_T.cnr -o out/allsamples/A_1_2_T.cns
+cnvkit.py scatter out/allsamples/A_1_2_T.cnr -s out/allsamples/A_1_2_T.cns -o  out/allsamples/A_1_2_T.png
+cnvkit.py segmetrics -s out/allsamples/A_1_2_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/A_1_2_T_segmetrics.cns out/allsamples/A_1_2_T.cnr
+
+cnvkit.py segment out/allsamples/A_1_2_K.cnr -o out/allsamples/A_1_2_K.cns
+cnvkit.py scatter out/allsamples/A_1_2_K.cnr -s out/allsamples/A_1_2_K.cns -o  out/allsamples/A_1_2_K.png
+cnvkit.py segmetrics -s out/allsamples/A_1_2_K.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/A_1_2_K_segmetrics.cns out/allsamples/A_1_2_K.cnr
+
+cnvkit.py segment out/allsamples/A_1_3_T.cnr -o out/allsamples/A_1_3_T.cns
+cnvkit.py scatter out/allsamples/A_1_3_T.cnr -s out/allsamples/A_1_3_T.cns -o  out/allsamples/A_1_3_T.png
+cnvkit.py segmetrics -s out/allsamples/A_1_3_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/A_1_3_T_segmetrics.cns out/allsamples/A_1_3_T.cnr
+
+cnvkit.py segment out/allsamples/A_1_3_K.cnr -o out/allsamples/A_1_3_K.cns
+cnvkit.py scatter out/allsamples/A_1_3_K.cnr -s out/allsamples/A_1_3_K.cns -o  out/allsamples/A_1_3_K.png
+cnvkit.py segmetrics -s out/allsamples/A_1_3_K.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/A_1_3_K_segmetrics.cns out/allsamples/A_1_3_K.cnr
+
+cnvkit.py segment out/allsamples/A_1_4_T.cnr -o out/allsamples/A_1_4_T.cns
+cnvkit.py scatter out/allsamples/A_1_4_T.cnr -s out/allsamples/A_1_4_T.cns -o  out/allsamples/A_1_4_T.png
+cnvkit.py segmetrics -s out/allsamples/A_1_4_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/A_1_4_T_segmetrics.cns out/allsamples/A_1_4_T.cnr
+
+cnvkit.py segment out/allsamples/A_1_5_T.cnr -o out/allsamples/A_1_5_T.cns
+cnvkit.py scatter out/allsamples/A_1_5_T.cnr -s out/allsamples/A_1_5_T.cns -o  out/allsamples/A_1_5_T.png
+cnvkit.py segmetrics -s out/allsamples/A_1_5_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/A_1_5_T_segmetrics.cns out/allsamples/A_1_5_T.cnr
+
+
+
+
+
+#A_2 Tumor samples
+
+cnvkit.py segment out/allsamples/A_2_1_T.cnr -o out/allsamples/A_2_1_T.cns
+cnvkit.py scatter out/allsamples/A_2_1_T.cnr -s out/allsamples/A_2_1_T.cns -o  out/allsamples/A_2_1_T.png
+cnvkit.py segmetrics -s out/allsamples/A_2_1_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/A_2_1_T_segmetrics.cns out/allsamples/A_2_1_T.cnr
+
+cnvkit.py segment out/allsamples/A_2_2_T.cnr -o out/allsamples/A_2_2_T.cns
+cnvkit.py scatter out/allsamples/A_2_2_T.cnr -s out/allsamples/A_2_2_T.cns -o  out/allsamples/A_2_2_T.png
+cnvkit.py segmetrics -s out/allsamples/A_2_2_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/A_2_2_T_segmetrics.cns out/allsamples/A_2_2_T.cnr
+
+cnvkit.py segment out/allsamples/A_2_3_T.cnr -o out/allsamples/A_2_3_T.cns
+cnvkit.py scatter out/allsamples/A_2_3_T.cnr -s out/allsamples/A_2_3_T.cns -o  out/allsamples/A_2_3_T.png
+cnvkit.py segmetrics -s out/allsamples/A_2_3_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/A_2_3_T_segmetrics.cns out/allsamples/A_2_3_T.cnr
+
+cnvkit.py segment out/allsamples/A_2_4_T.cnr -o out/allsamples/A_2_4_T.cns
+cnvkit.py scatter out/allsamples/A_2_4_T.cnr -s out/allsamples/A_2_4_T.cns -o  out/allsamples/A_2_4_T.png
+cnvkit.py segmetrics -s out/allsamples/A_2_4_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/A_2_4_T_segmetrics.cns out/allsamples/A_2_4_T.cnr
+
+cnvkit.py segment out/allsamples/A_2_5_T.cnr -o out/allsamples/A_2_5_T.cns
+cnvkit.py scatter out/allsamples/A_2_5_T.cnr -s out/allsamples/A_2_5_T.cns -o  out/allsamples/A_2_5_T.png
+cnvkit.py segmetrics -s out/allsamples/A_2_5_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/A_2_5_T_segmetrics.cns out/allsamples/A_2_5_T.cnr
+
+cnvkit.py segment out/allsamples/A_2_6_T.cnr -o out/allsamples/A_2_6_T.cns
+cnvkit.py scatter out/allsamples/A_2_6_T.cnr -s out/allsamples/A_2_6_T.cns -o  out/allsamples/A_2_6_T.png
+cnvkit.py segmetrics -s out/allsamples/A_2_6_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/A_2_6_T_segmetrics.cns out/allsamples/A_2_6_T.cnr
+
+cnvkit.py segment out/allsamples/A_2_6_K.cnr -o out/allsamples/A_2_6_K.cns
+cnvkit.py scatter out/allsamples/A_2_6_K.cnr -s out/allsamples/A_2_6_K.cns -o  out/allsamples/A_2_6_K.png
+cnvkit.py segmetrics -s out/allsamples/A_2_6_K.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/A_2_6_K_segmetrics.cns out/allsamples/A_2_6_K.cnr
+
+
+#A_3 Tumor samples
+
+cnvkit.py segment out/allsamples/A_3_1_T.cnr -o out/allsamples/A_3_1_T.cns
+cnvkit.py scatter out/allsamples/A_3_1_T.cnr -s out/allsamples/A_3_1_T.cns -o  out/allsamples/A_3_1_T.png
+cnvkit.py segmetrics -s out/allsamples/A_3_1_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/A_3_1_T_segmetrics.cns out/allsamples/A_3_1_T.cnr
+
+cnvkit.py segment out/allsamples/A_3_2_T.cnr -o out/allsamples/A_3_2_T.cns
+cnvkit.py scatter out/allsamples/A_3_2_T.cnr -s out/allsamples/A_3_2_T.cns -o  out/allsamples/A_3_2_T.png
+cnvkit.py segmetrics -s out/allsamples/A_3_2_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/A_3_2_T_segmetrics.cns out/allsamples/A_3_2_T.cnr
+
+cnvkit.py segment out/allsamples/A_3_3_T.cnr -o out/allsamples/A_3_3_T.cns
+cnvkit.py scatter out/allsamples/A_3_3_T.cnr -s out/allsamples/A_3_3_T.cns -o  out/allsamples/A_3_3_T.png
+cnvkit.py segmetrics -s out/allsamples/A_3_3_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/A_3_3_T_segmetrics.cns out/allsamples/A_3_3_T.cnr
+
+cnvkit.py segment out/allsamples/A_3_3_K.cnr -o out/allsamples/A_3_3_K.cns
+cnvkit.py scatter out/allsamples/A_3_3_K.cnr -s out/allsamples/A_3_3_K.cns -o  out/allsamples/A_3_3_K.png
+cnvkit.py segmetrics -s out/allsamples/A_3_3_K.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/A_3_3_K_segmetrics.cns out/allsamples/A_3_3_K.cnr
+
+cnvkit.py segment out/allsamples/A_3_4_T.cnr -o out/allsamples/A_3_4_T.cns
+cnvkit.py scatter out/allsamples/A_3_4_T.cnr -s out/allsamples/A_3_4_T.cns -o  out/allsamples/A_3_4_T.png
+cnvkit.py segmetrics -s out/allsamples/A_3_4_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/A_3_4_T_segmetrics.cns out/allsamples/A_3_4_T.cnr
+
+cnvkit.py segment out/allsamples/A_3_4_K.cnr -o out/allsamples/A_3_4_K.cns
+cnvkit.py scatter out/allsamples/A_3_4_K.cnr -s out/allsamples/A_3_4_K.cns -o  out/allsamples/A_3_4_K.png
+cnvkit.py segmetrics -s out/allsamples/A_3_4_K.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/A_3_4_K_segmetrics.cns out/allsamples/A_3_4_K.cnr
+
+cnvkit.py segment out/allsamples/A_3_5_T.cnr -o out/allsamples/A_3_5_T.cns
+cnvkit.py scatter out/allsamples/A_3_5_T.cnr -s out/allsamples/A_3_5_T.cns -o  out/allsamples/A_3_5_T.png
+cnvkit.py segmetrics -s out/allsamples/A_3_5_T.cns --mean --median --mode --t-test --stdev --iqr --ci --pi -o out/allsamples/A_3_5_T_segmetrics.cns out/allsamples/A_3_5_T.cnr
+
+
+```
+
+```{bash - heatmaps}
+cnvkit.py heatmap --no-shift-xy out/allsamples/*T.cns -o out/allsamples/heatmap_noshift_bin.pdf -b
+cnvkit.py heatmap -d --no-shift-xy out/allsamples/*T.cns -o out/allsamples/heatmap_noshift_bin_d.pdf -b
+cnvkit.py heatmap -d out/allsamples/*T.cns -o out/allsamples/heatmap_bin_d.pdf
+
+
+
+cnvkit.py heatmap -d out/allsamples/*.cnr --no-shift-xy -c 9:19230435-23000000 -o out/allsamples/heatmap_noshift_cnr_chr9.pdf
+```
+
+##################
+
+```{r - cnr clustering method}
+
+clustering <- data.frame(row.names = read.csv('cnvkit/out/allsamples/A_1_2_T.cnr', sep = '\t')[,4])
+for(i in colnames(nucsembl)){clustering[,paste0(i)] <- read.csv(paste0('cnvkit/out/allsamples/', i, '.cnr'), sep = '\t')[,5]}
+for(i in colnames(nucsembl)[str_detect(colnames(nucsembl), 'I')]){clustering[,paste0(i)] <- NULL}
+
+clustdist <- dist(t(clustering))
+hier <- hclust(clustdist)
+
+plot(hier)
+plot(hier, hang = -1)
+```
+
+```{bash - clustered_heatmap}
+cnvkit.py heatmap --no-shift-xy out/allsamples/{GBM_1_6_T,A_2_6_K,GBM_{2_6_K,3_6_T,3_7_T,3_3_T,3_1_T,3_4_T,1_4_T,1_5_T,2_2_K,3_2_T,3_5_T,2_3_T,2_4_T,2_5_T,2_2_T,2_6_T},A_{3_3_K,3_4_K,3_2_T,2_5_T,2_6_T,2_1_T,2_2_T,2_3_T,2_4_T,3_3_T,3_4_T,3_1_T,3_5_T,1_2_K,1_3_K,1_3_T,1_4_T,1_5_T,1_1_T,1_2_T},GBM_{1_2_K,1_3_K,1_1_K,1_1_T,1_2_T,1_3_T}}.cns -o out/allsamples/heatmap_clustered.pdf  -b
+```
+
+
+########    heatmap annotation construction     ######### 
+
+```{r - average_in_window function}
+average_in_window = function(window, gr, v, method = "weighted", empty_v = NA) {
+
+    if(missing(v)) v = rep(1, length(gr))
+    if(is.null(v)) v = rep(1, length(gr))
+    if(is.atomic(v) && is.vector(v)) v = cbind(v)
+
+    v = as.matrix(v)
+    if(is.character(v) && ncol(v) > 1) {
+        stop("`v` can only be a character vector.")
+    }
+
+    if(length(empty_v) == 1) {
+        empty_v = rep(empty_v, ncol(v))
+    }
+
+    u = matrix(rep(empty_v, each = length(window)), nrow = length(window), ncol = ncol(v))
+
+    mtch = as.matrix(findOverlaps(window, gr))
+    intersect = pintersect(window[mtch[,1]], gr[mtch[,2]])
+    w = width(intersect)
+    v = v[mtch[,2], , drop = FALSE]
+    n = nrow(v)
+
+    ind_list = split(seq_len(n), mtch[, 1])
+    window_index = as.numeric(names(ind_list))
+    window_w = width(window)
+
+    if(is.character(v)) {
+        for(i in seq_along(ind_list)) {
+            ind = ind_list[[i]]
+            if(is.function(method)) {
+                u[window_index[i], ] = method(v[ind], w[ind], window_w[i])
+            } else {
+                tb = tapply(w[ind], v[ind], sum)
+                u[window_index[i], ] = names(tb[which.max(tb)])
+            }
+        }
+    } else {
+        if(method == "w0") {
+            gr2 = reduce(gr, min.gapwidth = 0)
+            mtch2 = as.matrix(findOverlaps(window, gr2))
+            intersect2 = pintersect(window[mtch2[, 1]], gr2[mtch2[, 2]])
+
+            width_intersect = tapply(width(intersect2), mtch2[, 1], sum)
+            ind = unique(mtch2[, 1])
+            width_setdiff = width(window[ind]) - width_intersect
+
+            w2 = width(window[ind])
+
+            for(i in seq_along(ind_list)) {
+                ind = ind_list[[i]]
+                x = colSums(v[ind, , drop = FALSE]*w[ind])/sum(w[ind])
+                u[window_index[i], ] = (x*width_intersect[i] + empty_v*width_setdiff[i])/w2[i]
+            }
+
+        } else if(method == "absolute") {
+            for(i in seq_along(ind_list)) {
+                u[window_index[i], ] = colMeans(v[ind_list[[i]], , drop = FALSE])
+            }
+            
+        } else if(method == "weighted") {
+            for(i in seq_along(ind_list)) {
+                ind = ind_list[[i]]
+                u[window_index[i], ] = colSums(v[ind, , drop = FALSE]*w[ind])/sum(w[ind])
+            }
+        } else {
+            if(is.function(method)) {
+                for(i in seq_along(ind_list)) {
+                    ind = ind_list[[i]]
+                    u[window_index[i], ] = method(v[ind], w[ind], window_w[i])
+                }
+            } else {
+                stop("wrong method.")
+            }
+        }
+    }
+
+    return(u)
+}
+```
+
+```{r - plotcnv}
+library(ComplexHeatmap)
+library(circlize)
+library(GenomicRanges)
+library(EnrichedHeatmap)
+
+# load in datasets (use lapply to read in multiple to form list)
+
+segs <- list.files(path = 'data/cnvkit/out/allsamples/',pattern = 'segmetrics')
+
+segs <- list.files(path = 'data/cnvkit/out/allsamples/',pattern = 'segmetrics')
+cns <- c()
+for(i in segs){cns[i] <- list(read.table(paste0('cnvkit/out/allsamples/',i), sep="\t", header = T))}
+
+
+
+
+cns <- lapply(cns, function(x)
+  GRanges(seqnames=paste0("chr", x$chromosome), ranges=IRanges(start = x$start,
+    end=x$end), mcols=DataFrame(log2=x$log2, genes=x$gene)))
+
+# load in the chromosomal ranges 
+
+chr_df = read.chromInfo()$df
+chr_df = chr_df[chr_df$chr %in% paste0("chr", 1:22), ]
+chr_gr = GRanges(seqnames = chr_df[, 1], ranges = IRanges(chr_df[, 2] + 1, 
+  chr_df[, 3]))
+chr_gr
+
+chr_window = makeWindows(chr_gr, w = 1e4)
+chr_window
+
+# calculate average
+
+num_mat = sapply(cns, function(x)
+  average_in_window(chr_window, x, as.numeric(x$mcols.log2),
+                    method="weighted", empty_v=0))
+
+# start plotting
+
+chr = as.vector(seqnames(chr_window))
+chr_level = paste0("chr", c(seq(1:22)))
+chr = factor(chr, levels = chr_level)
+
+colnames(num_mat) <- sort(nuc_spe$ID_simple[nuc_spe$ROI_Type!='CD45'])
+rownames(num_mat) <- paste0(chr, ':', start(chr_window), '-', end(chr_window))
+
+
+png('out_figures/cnv_heatmap_by_sample_raster.png', height = 1520, width = 1782)
+
+ht_opt$TITLE_PADDING = unit(c(4, 4), "points")
+ht_list = Heatmap(num_mat, name = "log2", col = colorRamp2(c(-0.8, 0, 0.8), c("purple", "grey", "yellow")),
+    row_split = chr, cluster_rows = FALSE, show_column_dend = TRUE, cluster_column_slices = FALSE, 
+    column_split = sort(nuc_spe$ID_Sample[!str_detect(nuc_spe$ID_simple, 'I')]),
+    row_title_rot = 0, row_title_gp = gpar(fontsize = 10), border = TRUE, show_row_names = FALSE,
+    row_gap = unit(0, "points"))
+draw(ht_list, merge_legend = TRUE)
+
+dev.off()
+
+
+png('out_figures/cnv_heatmap_by_sample.png', height = 1520, width = 1782)
+
+ht_opt$TITLE_PADDING = unit(c(4, 4), "points")
+ht_list = Heatmap(num_mat, name = "log2", col = colorRamp2(c(-0.8, 0, 0.8), c("purple", "grey", "yellow")),
+    row_split = chr, cluster_rows = FALSE, show_column_dend = TRUE, cluster_column_slices = FALSE, 
+    column_split = sort(nuc_spe$ID_Sample[!str_detect(nuc_spe$ID_simple, 'I')]), use_raster = FALSE,
+    row_title_rot = 0, row_title_gp = gpar(fontsize = 10), border = TRUE, show_row_names = FALSE,
+    row_gap = unit(0, "points"))
+draw(ht_list, merge_legend = TRUE)
+
+dev.off()
+
+
+```
+
+
+
+```{r}
+saveRDS(num_mat, 'out/num_mat.RDS')
+```
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+
+real_newsembl <- distinct(newsembl[,1:6])
+rownames(real_newsembl) <- real_newsembl$Gene.stable.ID
+real_newsembl <- real_newsembl[rowData(nucsembl)$Ensembl,]
+
+rowData(nucsembl)$Gene_start <- as.numeric(paste0(real_newsembl$Chromosome.scaffold.name, '.', real_newsembl$Gene.start..bp.))
+nucsembl <- nucsembl[order(rowData(nucsembl)$Gene_start),]
+rownames(nucsembl) <- rowData(nucsembl)$Ensembl
+
+real_newsembl[order(real_newsembl[,'Chromosome.scaffold.name'], real_newsembl[,'Gene.start..bp.']), ]
+real_newsembl_ordered <- real_newsembl[order(real_newsembl[,'Chromosome.scaffold.name'], real_newsembl[,'Gene.start..bp.']), ]
+
+
+chr1p19q_ordered_ensembl <- real_newsembl_ordered$Gene.stable.ID[real_newsembl_ordered$Chromosome.scaffold.name %in% c(1,19)]
+chr1p19q_ordered_genes <- rowData(nucsembl[chr1p19q_ordered_ensembl,])$Symbol
+
+arm_split <- c(rep('1p', 788), rep('1q', 1445-788), rep('19p', 476), rep('19q', 1037-476))
+
+col1_global <- colMeans(assay(nuc_spe, 'logcounts')[chr1p19q_ordered_genes[arm_split == '1p'], !str_detect(nuc_spe$ID_simple, 'I')])- colMeans(assay(nuc_spe, 'logcounts')[, !str_detect(nuc_spe$ID_simple, 'I')])
+col1_global
+
+
+p1_sample <- as.vector(cbind(mean(col1_global[str_detect(names(col1_global), 'A_1')]),
+mean(col1_global[str_detect(names(col1_global), 'A_2')]),
+mean(col1_global[str_detect(names(col1_global), 'A_3')]),
+mean(col1_global[str_detect(names(col1_global), 'GBM_1')]),
+mean(col1_global[str_detect(names(col1_global), 'GBM_2')]),
+mean(col1_global[str_detect(names(col1_global), 'GBM_3')])))
+
+col19_global <- colMeans(assay(nuc_spe, 'logcounts')[chr1p19q_ordered_genes[arm_split == '19q'], !str_detect(nuc_spe$ID_simple, 'I')])- colMeans(assay(nuc_spe, 'logcounts')[, !str_detect(nuc_spe$ID_simple, 'I')])
+
+q19_sample <-as.vector(cbind(mean(col19_global[str_detect(names(col19_global), 'A_1')]),
+mean(col19_global[str_detect(names(col19_global), 'A_2')]),
+mean(col19_global[str_detect(names(col19_global), 'A_3')]),
+mean(col19_global[str_detect(names(col19_global), 'GBM_1')]),
+mean(col19_global[str_detect(names(col19_global), 'GBM_2')]),
+mean(col19_global[str_detect(names(col19_global), 'GBM_3')])))
+
+names(p1_sample) <- c('A_1', 'A_2', 'A_3', 'GBM_1', 'GBM_2', 'GBM_3')
+names(q19_sample) <- c('A_1', 'A_2', 'A_3', 'GBM_1', 'GBM_2', 'GBM_3')
+
+sample_1p19q <- c(p1_sample[1:3],q19_sample[1:3])[c(1,4,2,5,3,6)]
+
+pdf(file  = 'out_figures/chr1_19_relative_mean_expression.pdf', height = 8, width = 6)
+draw(HeatmapAnnotation('1p19q' = anno_barplot(sample_1p19q, height = unit(300, 'pt'), bar_width = 1, gp =gpar(fill = rep(c('#A4E6E7', '#0DACFF'), 3)))) %v%
+HeatmapAnnotation(space = anno_text(c('\nA_1.1p', '\nA_1.19q', '\nA_2.1p', '\nA_2.19q', '\nA_3.1p', '\nA_3.19q'), rot = 0, just = 'centre'), annotation_name_align = T))
+dev.off()
+
+draw(HeatmapAnnotation('1p19q' = anno_barplot(sample_1p19q, height = unit(300, 'pt'), bar_width = 1, gp =gpar(fill = rep(c('#A4E6E7', '#0DACFF'), 3)))) %v%
+HeatmapAnnotation(space = anno_text(c('\nA_1.1p', '\nA_1.19q', '\nA_2.1p', '\nA_2.19q', '\nA_3.1p', '\nA_3.19q'), rot = 0, just = 'centre'), annotation_name_align = T))
+```
+
+
+
+```{r}
+pdgfra <- as.vector(assay(com_spe['PDGFRA',com_spe$class == 'GBM' & com_spe$ROI_Type == 'tumor'], 'Limma'))
+names(pdgfra) <- colnames(assay(com_spe['PDGFRA',com_spe$class == 'GBM' & com_spe$ROI_Type == 'tumor'], 'Limma'))
+
+
+pdf('out_figures/pdgfra_plot.pdf', width = 10, height = 6)
+
+draw(Heatmap(t(pdgfra), cluster_columns = F) %v% 
+       HeatmapAnnotation('PDGFRA' = anno_barplot(pdgfra, gp = gpar(fill = '#EA943F')), height = unit(200, 'pt')))
+
+dev.off()
+
+draw(Heatmap(t(pdgfra), cluster_columns = F) %v% 
+       HeatmapAnnotation('PDGFRA' = anno_barplot(pdgfra, gp = gpar(fill = '#EA943F')), height = unit(200, 'pt')))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
