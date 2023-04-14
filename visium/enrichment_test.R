@@ -5,7 +5,7 @@ library(SpatialExperiment)
 library(parallel)
 
 
-setwd("/stornext/Bioinf/data/lab_brain_cancer/public_datasets/gbm_spatial/doi_10.5061_dryad.h70rxwdmj__v11/10XVisium_2/")
+setwd("gbm_spatial/doi_10.5061_dryad.h70rxwdmj__v11/10XVisium_2/")
 
 
 find_observed <- function(x, df, a="TAM", b="MES_like"){

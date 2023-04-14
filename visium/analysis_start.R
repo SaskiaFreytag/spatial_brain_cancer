@@ -4,7 +4,7 @@ library(spatstat)
 library(paletteer)
 library(wesanderson)
 
-setwd("/stornext/Bioinf/data/lab_brain_cancer/public_datasets/gbm_spatial/doi_10.5061_dryad.h70rxwdmj__v11/10XVisium_2/")
+setwd("gbm_spatial/doi_10.5061_dryad.h70rxwdmj__v11/10XVisium_2/")
 
 features <- c("APOE", "A2M", "VEGFA", "EGR1", "GLIS3", "CHIC2", "C4B")
 
