@@ -1,0 +1,218 @@
+---
+title: "Plot"
+author: "Saskia Freytag"
+date: "2023-02-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(tidyverse)
+library(pals)
+```
+
+## Load Nanostring data
+
+```{r}
+spe <- readRDS("../data/raw/SMI-0151_SarahBest_WEHI/6 Analysis/Data objects/seurat_object.Rds")
+index_jj98 <- grep("JJ98", colnames(spe), value=TRUE)
+```
+
+## Make quick plot 
+
+```{r}
+colours <- c("MES-like"="#DD716E", "TAM-MG"="#3C77B2", "AC-like"="#91B8E1", 
+             "TAM-BDM"="#5A9EB5",  "NPC-like/OPC-like/RG"="#E5F9BC", "Mixed"="#FF9933", "Oligo"="#336600","Mono"="#A280B4",
+             "Vasculature"="black", "CD4/CD8"="#BB5C3C")
+```
+
+```{r}
+coord_df <- as.data.frame(spe@images$JJ98$centroids@coords)
+
+df_spe <- as.data.frame(spe@assays$Nanostring@counts)
+df_spe <- cbind(t(df_spe[, index_jj98]), coord_df)
+df_spe <- cbind(df_spe, spe@meta.data[index_jj98,])
+
+anno <- readRDS("../data/annotation_all.rds")
+df_spe$Anno <- anno$Annotation
+
+df_spe$cell_ID_new <- paste0(df_spe$fov, "_", sapply(df_spe$cell_ID, function(x) strsplit(x, "_", fixed=TRUE)[[1]][4]))
+```
+
+```{r}
+for(i in unique(df_spe$fov)){
+
+  gg1 <- df_spe %>% filter(fov==i) %>% 
+    ggplot(aes(x=x, y=y, col=Anno)) + geom_point() + 
+    scale_color_manual(values=colours) + theme_bw()
+  
+  ggsave(gg1, file=paste0("../figures/annotated_fov_", i, ".jpg"))
+  
+  
+}
+```
+
+```{r}
+immune <- c("TAM-MG", "TAM-BDM", "Mono", "DC", "CD4/CD8")
+tumour <- c("Mixed", "MES-like", "NPC-like/OPC-like/RG", "AC-like", "Oligo")
+
+for(i in unique(df_spe$fov)){
+  
+    gg1 <- df_spe %>% filter(fov==i) %>% filter(Anno %in% tumour) %>% select("Anno") %>%
+    dplyr::count(Anno) %>%
+    dplyr::mutate(pct= prop.table(n) * 100) %>%
+    ggplot(aes(x="", y=pct, fill=Anno)) +
+      geom_bar(width = 1, stat = "identity") + coord_polar("y", start=0) + theme_void() +
+      theme(axis.text.x=element_blank()) + scale_fill_manual(values=colours)
+    
+    ggsave(gg1, file=paste0("../figures/pie_chart_tumour_fov_", i, ".jpg"))
+  
+    gg2 <- df_spe %>% filter(fov==i) %>% filter(Anno %in% immune) %>% select("Anno") %>%
+    dplyr::count(Anno) %>%
+    dplyr::mutate(pct= prop.table(n) * 100) %>%
+    ggplot(aes(x="", y=pct, fill=Anno)) +
+      geom_bar(width = 1, stat = "identity") + coord_polar("y", start=0) + theme_void() +
+      theme(axis.text.x=element_blank()) + scale_fill_manual(values=colours)
+    
+    ggsave(gg2, file=paste0("../figures/pie_chart_immune_fov_", i, ".jpg"))
+    
+       
+}
+  
+```
+
+```{r}
+colours_top2a <- c("TRUE"="red", "FALSE"="grey")
+
+
+for(i in unique(df_spe$fov)){
+
+  gg1 <- df_spe %>% filter(fov==i) %>% mutate(TOP2A_exp=TOP2A>0) %>%
+    ggplot(aes(x=x, y=y, col=TOP2A_exp)) + geom_point() + 
+    scale_color_manual(values=colours_top2a) + theme_bw()
+  
+  ggsave(gg1, file=paste0("../figures/top2a_fov_", i, ".jpg"))
+  
+  
+}
+
+
+for(i in unique(df_spe$fov)){
+
+  gg1 <- df_spe %>% filter(fov==i) %>% mutate(PTPRC_exp=PTPRC>0) %>%
+    ggplot(aes(x=x, y=y, col=PTPRC_exp)) + geom_point() + 
+    scale_color_manual(values=colours_top2a) + theme_bw()
+  
+  ggsave(gg1, file=paste0("../figures/ptprc_fov_", i, ".jpg"))
+  
+  
+}
+```
+
+```{r}
+tmp <- df_spe %>% mutate(TOP2A_exp=TOP2A>0) %>% dplyr::count(Anno, TOP2A_exp) %>%       
+  dplyr::group_by(Anno) %>%
+  dplyr::mutate(pct= prop.table(n) * 100)
+
+tmp
+
+gg1 <- ggplot(tmp, aes(x=Anno, y=pct, fill=TOP2A_exp)) + geom_col() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+gg1 
+
+sub_cell_types <- c("Mixed", "MES-like", "AC-like", "NPC-like/OPC-like/RG", "Oligo")
+tmp <- tmp[tmp$Anno %in% sub_cell_types,]
+tmp <- tmp[tmp$TOP2A_exp,]
+
+gg1 <- ggplot(tmp, aes(x=Anno, y=pct, fill=Anno)) + geom_col() + 
+   theme_minimal() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_fill_manual(values=colours)
+
+gg1 
+
+
+ggsave(gg1, file="../figures/TOP2A_expr_by_cell_type.jpg")
+```
+
+# Calculate distance for cell types
+
+```{r}
+
+  dist_all <- df_spe %>% filter(fov==i) %>% select(x, y) %>% dist()
+  dist_all <- reshape2::melt(as.matrix(dist_all))
+  colnames(dist_all) <- c("Cell1", "Cell2", "Distance")
+  
+  dist_all$Anno1 <-  df_spe$Anno[match(dist_all$Cell1, rownames(df_spe))]
+  dist_all$Anno2 <-  df_spe$Anno[match(dist_all$Cell2, rownames(df_spe))]
+
+```
+
+
+# Make ploygon plots
+
+```{r}
+df_polygons <- read.csv("../data/raw/SMI-0151_SarahBest_WEHI/5 Raw data/JJ98/JJ98-polygons.csv")
+df_polygons$cellID_new <- paste0(df_polygons$fov, "_", df_polygons$cellID)
+
+df_polygons$Anno <- df_spe$Anno[match(df_polygons$cellID_new, df_spe$cell_ID_new)]
+df_polygons$Anno[is.na(df_polygons$Anno)] <- "Not available"
+```
+
+```{r}
+colours <- c(colours, c("Not available"="white"))
+
+for(i in  unique(df_spe$fov)){
+
+  gg1 <- df_polygons %>% filter(fov==i) %>% ggplot(aes(x = x_local_px, y = y_local_px)) +
+    geom_polygon(aes(fill = Anno, group = cellID_new), 
+    colour="darkgrey", linewidth=0.25) + scale_fill_manual(values=colours) + theme_bw()
+
+  ggsave(gg1, file=paste0("../figures/annotated_fov_", i, ".jpg"))
+  
+}
+```
+
+```{r}
+colours <- c(colours, c("Not available"="white", "Other"="lightgrey"))
+df_polygons$Anno_new <- df_polygons$Anno
+df_polygons$Anno_new[!df_polygons$Anno_new %in% sub_cell_types] <- "Other"
+
+
+for(i in  unique(df_spe$fov)){
+
+  gg1 <- df_polygons %>% filter(fov==i) %>% ggplot(aes(x = x_local_px, y = y_local_px)) +
+    geom_polygon(aes(fill = Anno_new, group = cellID_new), 
+    colour="darkgrey", linewidth=0.25) + scale_fill_manual(values=colours) + theme_bw()
+
+  ggsave(gg1, file=paste0("../figures/annotated_fov_", i, "_tumour.jpg"))
+  
+}
+```
+
+```{r}
+colours <- c(colours, c("Not available"="white"))
+
+cell_types <- names(colours)
+
+for(i in  unique(df_spe$fov)){
+  
+  for(ii in cell_types){
+  
+  df_polygons$Anno1 <- df_polygons$Anno
+  df_polygons$Anno1[df_polygons$Anno1!=ii] <- "Not available"
+  gg1 <- df_polygons %>% filter(fov==i) %>% ggplot(aes(x = x_local_px, y = y_local_px)) +
+    geom_polygon(aes(fill = Anno1, group = cellID_new), 
+    colour="darkgrey", linewidth=0.25) + scale_fill_manual(values=colours) + theme_bw()
+  
+  ii <- gsub("/", "_", ii, fixed=TRUE)
+  
+  ggsave(gg1, file=paste0("../figures/annotated_fov_", i,"_", ii ,".jpg"))
+  
+  }
+  
+}
+```
+
+

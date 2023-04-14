@@ -1,0 +1,581 @@
+---
+title: "Receptor-Ligand Analysis"
+author: "Saskia Freytag"
+date: "2023-02-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(reticulate)
+use_virtualenv("r-reticulate")
+knitr::knit_engines$set(python = reticulate::eng_python)
+
+library(SingleCellExperiment)
+library(pheatmap)
+library(ggplot2)
+library(magrittr)
+library(dplyr)
+library(igraph)
+library(RColorBrewer)
+library(pals)
+library(viridis)
+
+l_r_pairs_known <- read.table("../data/human_lr_pair.txt", head=TRUE)
+l_r_pairs_known$lr_pair <- gsub("_", "|", l_r_pairs_known$lr_pair ) 
+
+source("../scripts/plotting.R")
+source("../scripts/ligand_receptors.R")
+```
+
+## Load SingleCellExperiment
+
+```{r}
+sce <- readRDS("../data/sce_jj98_tiles.rds")
+sce$cell_ID <- gsub("JJ98_", "", colnames(sce))
+
+meta <- read.csv("../data/raw/SMI-0151_SarahBest_WEHI/5 Raw data/JJ98/JJ98_metadata_file.csv")
+meta$cell_ID_new <- paste0(meta$cell_ID, "_", meta$fov)
+
+sce$fov <- meta$fov[match(sce$cell_ID, meta$cell_ID_new)]
+
+anno <- readRDS("../data/annotation_all.rds")
+sce$Anno <- anno$Annotation
+
+
+barcodes <- colnames(sce)
+barcodes <- gsub("JJ98_", "", barcodes)
+cluster <- sce$Anno
+tile <- sce$Tile
+
+colours <- c("MES-like"="#DD716E", "TAM-MG"="#3C77B2", "AC-like"="#91B8E1", 
+             "TAM-BDM"="#5A9EB5",  "NPC-like/OPC-like/RG"="#E5F9BC", "Mixed"="#FF9933", 
+             "Oligo"="#336600","Mono"="#A280B4",
+             "Vasculature"="black", "CD4/CD8"="#BB5C3C")
+```
+
+## Load data into Python
+
+```{python}
+import scanpy as sc
+import squidpy as sq
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pathlib import Path
+import pandas as pd
+
+adata = sq.read.nanostring(
+    path="../data/raw/SMI-0151_SarahBest_WEHI/5 Raw data/JJ98/",
+    counts_file="JJ98_exprMat_file.csv",
+    meta_file="JJ98_metadata_file.csv",
+    fov_file="JJ98_fov_positions_file.csv",
+)
+
+sc.pp.normalize_total(adata, inplace=True)
+sc.pp.log1p(adata)
+
+adata = adata[r.barcodes].copy()
+adata.obs['cluster'] = pd.Categorical(r.cluster)
+adata.obs['tile'] = pd.Categorical(r.tile)
+```
+
+# Neighboorhood interactions and enrichment
+
+```{python}
+sq.gr.spatial_neighbors(
+    adata,
+    radius=179,
+    coord_type="generic",
+)
+
+sq.gr.nhood_enrichment(adata, cluster_key="cluster")
+sq.gr.interaction_matrix(adata, cluster_key="cluster")
+
+neighs = adata.obsp["spatial_connectivities"]
+```
+
+```{r}
+neighs <- py$neighs
+blocks <- lapply(unique(sce$fov), function(x) expand.grid(which(sce$fov==x), which(sce$fov!=x)))
+blocks <- as.matrix(do.call(rbind, blocks))
+
+neighs[blocks] <- 0
+```
+
+```{python}
+adata.obsp["spatial_connectivities"] = r.neighs
+
+neighs = adata.obsp["spatial_connectivities"]
+```
+
+## Networks for each FOV
+
+```{r, fig.height=5, fig.width=5}
+collect_fovs  <- list()
+neighs <- py$neighs
+
+
+for(i in unique(sce$fov)){
+
+  neighs_fov1 <- neighs[sce$fov==i, sce$fov==i]
+
+  neighs_fov1 <- graph_from_adjacency_matrix(
+    neighs_fov1,
+    mode = c("undirected"),
+  )
+
+  V(neighs_fov1)$color <- colours[sce$Anno[sce$fov==i]]
+
+  set.seed(10)
+  pdf(paste0("../figures/network_fov", i, ".pdf"))
+    plot(neighs_fov1, vertex.label=NA, vertex.size=1.5, 
+       vertex.frame.color=NA, edge.width=1)
+  dev.off()
+
+  mem <- sce$Anno[sce$fov==i]
+  all_cell_types <- unique(mem)
+  
+  mem_all <- lapply(all_cell_types, function(x) {
+    mem[mem!=x] <- "Other"
+    mem })
+  
+  collect_fovs[[i]] <- sapply(mem_all, function(x) modularity(neighs_fov1,                membership=as.numeric(as.factor(x))))
+  names(collect_fovs[[i]]) <- all_cell_types
+}
+```
+
+Find modularity for each cell type.
+
+```{r}
+df_modularity_all <- data.frame(modularity=as.numeric(unlist(collect_fovs)), cell_type=unlist(lapply(collect_fovs, names)),
+          fov=as.factor(rep(unique(sce$fov), lengths(collect_fovs)[lengths(collect_fovs)!=0])))
+
+gg1 <- ggplot(df_modularity_all, aes(x=fov, y=modularity, col=cell_type)) + 
+  geom_jitter(size=2) + theme_minimal() + scale_color_manual(values=colours)
+
+gg1
+```
+
+Extract modularity for only tumour cell types.
+
+```{r}
+sub_cell_types <- c("Mixed", "MES-like", "AC-like", "NPC-like/OPC-like/RG", "Oligo")
+df_modularity <- df_modularity_all[df_modularity_all$cell_type %in% sub_cell_types,]
+
+df_summary <- df_modularity %>% group_by(cell_type) %>% summarize( sd_mod=sd(modularity), modularity=mean(modularity))
+
+gg1 <- ggplot(data=df_modularity, aes(x=cell_type, y=modularity, col=cell_type)) +
+  geom_jitter(position = position_jitter(0.2)) + scale_color_manual(values=colours) +
+  geom_pointrange(aes(ymin = modularity-sd_mod, ymax = modularity+sd_mod, color=cell_type), data = df_summary) + theme_minimal()
+
+gg1
+ggsave(gg1, file="../figures/modularity_tumour.pdf", height=5, width=5)
+```
+
+Implement testing.
+
+```{r}
+t.test(df_modularity$modularity[df_modularity$cell_type=="AC-like"],
+       df_modularity$modularity[df_modularity$cell_type=="MES-like"])
+t.test(df_modularity$modularity[df_modularity$cell_type=="AC-like"],
+       df_modularity$modularity[df_modularity$cell_type=="Mixed"])
+
+t.test(df_modularity$modularity[df_modularity$cell_type=="NPC-like/OPC-like/RG"],
+       df_modularity$modularity[df_modularity$cell_type=="MES-like"])
+t.test(df_modularity$modularity[df_modularity$cell_type=="NPC-like/OPC-like/RG"],
+       df_modularity$modularity[df_modularity$cell_type=="Mixed"])
+```
+
+Extract modularity for only non-tumour and vasculature cell types.
+
+```{r}
+sub_cell_types <- c("Mixed", "MES-like", "AC-like", "NPC-like/OPC-like/RG", "Oligo", "Vasculature")
+df_modularity <- df_modularity_all[!df_modularity_all$cell_type %in% sub_cell_types,]
+
+gg1 <- ggplot(df_modularity, aes(x=fov, y=modularity, col=cell_type)) + 
+  geom_jitter(size=2) + theme_minimal() + scale_color_manual(values=colours)
+
+gg1
+
+
+df_summary <- df_modularity %>% group_by(cell_type) %>% summarize( sd_mod=sd(modularity), modularity=mean(modularity))
+
+gg1 <- ggplot(data=df_modularity, aes(x=cell_type, y=modularity, col=cell_type)) +
+  geom_jitter(position = position_jitter(0.2)) + scale_color_manual(values=colours) +
+  geom_pointrange(aes(ymin = modularity-sd_mod, ymax = modularity+sd_mod, color=cell_type), data = df_summary) + theme_minimal()
+
+
+gg1
+
+ggsave(gg1, file="../figures/modularity_immune.pdf", height=5, width=5)
+```
+
+## Networks for each neighborhood
+
+```{r, fig.height=5, fig.width=5}
+collect_tiles  <- list()
+
+for(i in unique(sce$Tile)){
+
+  neighs_fov1 <- neighs[sce$Tile==i, sce$Tile==i]
+
+  neighs_fov1 <- graph_from_adjacency_matrix(
+    neighs_fov1,
+    mode = c("undirected"),
+  )
+
+  V(neighs_fov1)$color <- colours[sce$Anno[sce$Tile==i]]
+
+  set.seed(10)
+  pdf(paste0("../figures/network_neighborhood", i, ".pdf"))
+  plot(neighs_fov1, vertex.label=NA, vertex.size=1.5, 
+       vertex.frame.color=NA, edge.width=0.1)
+  dev.off()
+
+  mem <- sce$Anno[sce$Tile==i]
+  
+  collect_tiles[[i]] <- modularity(neighs_fov1, membership=as.numeric(as.factor(mem)))
+}
+```
+
+```{r}
+cols <- brewer.set1(9)
+names(cols) <- 1:9
+
+df_tiles <- data.frame(tiles=names(collect_tiles),
+            modularity=unlist(collect_tiles))
+
+gg1 <- ggplot(df_tiles, aes(x=tiles, y=modularity, fill=tiles)) + geom_col() + 
+  theme_minimal() + scale_fill_manual(values=cols)
+ 
+ggsave(gg1, file="../figures/modularity_neighborhood.pdf")
+```
+
+
+# Ligand-Receptor Analysis
+
+```{python}
+res = sq.gr.ligrec(
+    adata,
+    n_perms=1000,
+    cluster_key="cluster",
+    copy=True,
+    use_raw=False,
+    transmitter_params={"categories": "ligand"},
+    receiver_params={"categories": "receptor"},
+)
+
+gene_index = res["means"].index
+gene_index = gene_index.to_frame()
+
+res_means = res["means"].values
+res_pvalues = res["pvalues"].values
+
+cell_index = res["means"].columns
+cell_index = cell_index.to_frame()
+```
+
+
+```{r, eval=FALSE}
+res_means <- py$res_means
+res_pvalues <- py$res_pvalues
+res_gene_comb <- py$gene_index
+res_cell_comb <- py$cell_index
+
+all_res <- list(means=res_means, pvalues=res_pvalues, gene_comb=res_gene_comb,
+     cell_comb=res_cell_comb)
+
+saveRDS(all_res, file="../data/LR_all_res.rds")
+```
+
+
+```{r, include=FALSE}
+all_res <- readRDS("../data/LR_all_res.rds")
+res_means <- all_res$means
+res_pvalues <- all_res$pvalues
+res_gene_comb <- all_res$gene_comb
+res_cell_comb <- all_res$cell_comb
+```
+
+## Immune to Tumour for Ligand-Receptors of interest
+
+```{r, fig.height=8, fig.width=5}
+immune_interest <- c("TAM-BDM", "TAM-MG", "Mono", "CD4/CD8")
+tumour_interest <- c("MES-like", "AC-like", "NPC-like/OPC-like/RG", "Mixed")
+
+l_r_interest <- c("HMGB1", "MIF", "CXCR4", "TGFBR1", 
+                  "HAVCR2", "TGFBR2", "TGFB1", "ACVR1B", "ACVR1",
+                  "TGFB2", "ACVR2A", "TNFSF13", "INHBB", "TNFRSG13B", 
+                  "TNFRSF17", "NODAL")
+
+df_l_r <- l_r_interest_df(res_cell_comb, immune_interest, tumour_interest, 
+                l_r_interest, res_means, res_pvalues, res_gene_comb)
+df_l_r <- df_l_r[!is.na(df_l_r$pvalue),]
+df_l_r <- df_l_r[df_l_r$pvalue<0.001,]
+
+
+ggplot(df_l_r, aes(x=Cells, y=`L-R`, col=mean)) + geom_point() + 
+  scale_color_viridis_c() + theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y=element_text(size=4)) 
+
+
+order_cells_comb <- paste0(rep(immune_interest, length(tumour_interest)), "|", 
+                           rep(tumour_interest, each=length(immune_interest)))
+
+df_l_r$Cells <- factor(df_l_r$Cells, levels=order_cells_comb)
+
+ggplot(df_l_r, aes(x=Cells, y=`L-R`, col=mean)) + geom_point() + scale_color_viridis_c() + theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y=element_text(size=4)) 
+
+```
+
+
+```{r}
+tumour_specific <- c("TGFB1|STAT3", "TGFB1|VEGFA",
+  "TGFB1|EGFR",
+  "TGFB1|PTK2", 
+  "TGFB1|MMP2", "TGFB1|IL1RN",
+  "TGFB1|ITK1", "TGFB1|CD28")
+
+
+df_tumour <- df_l_r[df_l_r$`L-R` %in% tumour_specific,] 
+df_tumour$`L-R` <- factor(df_tumour$`L-R`, levels=rev(tumour_specific))
+
+gg1 <- ggplot(df_tumour, aes(x=Cells, y=`L-R`, col=mean)) + 
+  geom_point() + scale_color_viridis_c() + theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y=element_text(size=4)) 
+
+gg1
+
+ggsave(gg1, file="../figures/lr_immune_tumour_immunespecific.pdf")
+
+```
+
+
+```{r}
+immune_specific <- c("CCL5|CXCR4", "CXCL8|CXCR4", "MIF|ACKR3", "MIF|MMP9",
+                     "MIF|TNFRSF14",  "MIF|CD74",  "MIF|CXCR2", "MIF|CXCR4", "MIF|CD44",
+                     "CXCL3|CXCR4", "CCL2|CXCR4", "THBS1|TGFB1", "LGALS9|HAVCR2")
+
+df_immune <- df_l_r[df_l_r$`L-R` %in% immune_specific,] 
+df_immune$`L-R` <- factor(df_immune$`L-R`, levels=rev(immune_specific))
+
+df_immune$Cells <- factor(df_immune$Cells, levels=sort(unique(as.character(df_immune$Cells))))
+
+gg1 <- ggplot(df_immune, aes(x=Cells, y=`L-R`, col=mean)) + 
+  geom_point() + scale_color_viridis_c() + theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y=element_text(size=4)) 
+
+gg1 
+
+ggsave(gg1, file="../figures/lr_immune_tumour_tumourspecific.pdf")
+```
+
+## Tumour to Immune for Ligand-Receptors of interest
+
+```{r}
+immune_interest <- c("TAM-BDM", "TAM-MG", "Mono", "CD4/CD8")
+tumour_interest <- c("AC-like", "MES-like", "Mixed", "NPC-like/OPC-like/RG")
+
+l_r_interest <- c("HMGB1", "MIF", "CXCR4", "TGFBR1", "HAVCR2", "TGFBR2", "TGFB1", "ACVR1B", "ACVR1",
+                  "TGFB2", "ACVR2A", "TNFSF13", "INHBB", "TNFRSG13B", "TNFRSF17", "NODAL")
+
+df_l_r <- l_r_interest_df(res_cell_comb, tumour_interest, immune_interest, 
+                l_r_interest, res_means, res_pvalues, res_gene_comb)
+df_l_r <- df_l_r[!is.na(df_l_r$pvalue),]
+df_l_r <- df_l_r[df_l_r$pvalue<0.001,]
+
+df_l_r_sub <- df_l_r[grepl("^TGFB1", df_l_r$`L-R`) | grepl("^TGFB2", df_l_r$`L-R`),]
+
+order_cells_comb <- paste0(rep(tumour_interest, length(immune_interest)), "|", 
+                           rep(immune_interest, each=length(tumour_interest)))
+df_l_r_sub$Cells <- factor(df_l_r_sub$Cells, levels=order_cells_comb)
+
+ggplot(df_l_r_sub, aes(x=Cells, y=`L-R`, col=mean)) + geom_point() + scale_color_viridis_c() + theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y=element_text(size=4)) 
+```
+
+```{r}
+lr_interest <- c("TGFB1|PTGS1", "TGFB1|TGFBR2",
+             "TGFB1|TGFBR1", "TGFB1|FCGR3A", "TGFB1|THBS1", "TGFB1|TLR2",
+        "TGFB1|SLC2A1",  "TGFB1|PPARG", "TGFB1|CXCR4",
+        "TGFB2|ACVR1", "TGFB2|ACVR1B", "TGFB2|TGFB1", "TGFB1|IL1RN")
+
+df_l_r_sub <- df_l_r_sub[df_l_r_sub$`L-R` %in% lr_interest,] 
+df_l_r_sub$`L-R` <- factor(df_l_r_sub$`L-R`, levels=rev(lr_interest))
+
+
+gg1 <- ggplot(df_l_r_sub , aes(x=Cells, y=`L-R`, col=mean)) + 
+  geom_point() + scale_color_viridis_c() + theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y=element_text(size=4)) 
+
+gg1 
+
+ggsave(gg1, file="../figures/lr_tumour_immune.pdf")
+```
+
+
+```{r}
+lr_interest <- c("MIF|CXCR4", "TGFB1|TGFBR1","TGFB2|TGFBR1", "HMGB1|HAVCR2", "TGFB2|TGFBR2",
+                 "TDGF1|AVCR1B", "INHBB|AVCR1B", "NODAL|AVCR1B", "INHBB|AVCR2A",
+                 "TNFSF13|TNFRSF13B", "TNFSF13|TNFRSF17")
+
+df_l_r_sub <- df_l_r[df_l_r$`L-R` %in% lr_interest,] 
+df_l_r_sub$`L-R` <- factor(df_l_r_sub$`L-R`, levels=rev(lr_interest))
+
+
+gg1 <- ggplot(df_l_r_sub , aes(x=Cells, y=`L-R`, col=mean)) + 
+  geom_point() + scale_color_viridis_c() + theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y=element_text(size=4)) 
+
+gg1 
+
+ggsave(gg1, file="../figures/lr_tumour_immune_new_selection.pdf")
+
+```
+
+
+## Tumour to Tumour for Ligand-Receptors of interest
+
+```{r, fig.height=12, fig.width=6}
+df_l_r <- l_r_interest_df(res_cell_comb, tumour_interest, tumour_interest, 
+                l_r_interest, res_means, res_pvalues, res_gene_comb)
+df_l_r <- df_l_r[!is.na(df_l_r$pvalue),]
+df_l_r <- df_l_r[df_l_r$pvalue<0.001,]
+
+
+ggplot(df_l_r, aes(x=Cells, y=`L-R`, col=mean)) + geom_point() + scale_color_viridis_c() + theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y=element_text(size=4)) 
+```
+
+```{r}
+lr_receptor <- c("BMP7|ACVR1B", "BPM7|ACVR1", "BPM7|ACVR2A", "TGFB2|ACVR1",
+      "TGFB2|ACVR1B", "TGFBR1|TGFBR1", "TGFB3|ACVR1", "CXCL2|CXCR4", "VEGFA|TGFBR1",
+      "LEFTY|ACVR2A",  "GDF9|ACVR1B", "GDF|ACVR2A", "GDF9|ACVR2A",
+      "LEFTY|ACVR1B", "INHA|ACVR1B", "INHA|ACVR1", 
+      "MIF|EGFR", "MIF|ACKR3", "MIF|CXCR2", "MIF|TNFRSF14", "BMP3|ACVR2A")
+
+df_l_r_recp <- df_l_r[df_l_r$`L-R` %in% lr_receptor,] 
+df_l_r_recp$`L-R` <- factor(df_l_r_recp$`L-R`, levels=rev(lr_receptor))
+
+
+gg1 <- ggplot(df_l_r_recp , aes(x=Cells, y=`L-R`, col=mean)) + 
+  geom_point() + scale_color_viridis_c() + theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y=element_text(size=4)) 
+
+gg1 
+
+ggsave(gg1, file="../figures/lr_tumour_tumour_receptor_specific.pdf")
+```
+
+```{r}
+lr_ligand <- c("TGFB1|VEGFA", "TGFB1|STAT3",
+  "TGFB1|CSF1", "TGFB1|ITGAV", "TGFB1|ITGB8",
+  "TGFB1|TGFBR1", "TGFB1|MMP2", "TGFB1|PDGFRA", "TGFB1|EPHB2",
+  "GDF9|TGFBR1", "GDF10|TGFBR1", "TGFB3|TGFBR1")
+
+df_l_r_lig <- df_l_r[df_l_r$`L-R` %in% lr_ligand,] 
+df_l_r_lig$`L-R` <- factor(df_l_r_lig$`L-R`, levels=rev(lr_ligand))
+
+order_cells_comb <- paste0(rep(tumour_interest, length(tumour_interest)), "|", 
+                           rep(tumour_interest, each=length(tumour_interest)))
+df_l_r_lig$Cells <- factor(df_l_r_lig$Cells, levels=order_cells_comb)
+
+
+gg1 <- ggplot(df_l_r_lig , aes(x=Cells, y=`L-R`, col=mean)) + 
+  geom_point() + scale_color_viridis_c() + theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y=element_text(size=4)) 
+
+gg1 
+
+ggsave(gg1, file="../figures/lr_tumour_tumour_ligand_specific.pdf")
+```
+
+# Find Specifc Ligand Receptors for Tumour Cell Types
+
+Looking at tumour to immune. 
+
+```{r, fig.height=5, fig.width=5}
+df_l_r_ti <- lapply(tumour_interest, function(x) find_specific_comb(
+  res_cell_comb, tumour_interest, immune_interest,
+    x, 1, res_gene_comb, res_pvalues, res_means))
+
+df_l_r_ti <- lapply(df_l_r_ti, function(x) x[x[,1] %in% l_r_pairs_known$lr_pair,]) 
+
+l_r_pairs <- lapply(df_l_r_ti, function(tmp) tmp %>% group_by(`L-R`) %>% summarize(mean=sum(mean)) %>% arrange(desc(mean)) %>%
+  dplyr::select(`L-R`) %>% slice(1:10))
+l_r_pairs <- unlist(l_r_pairs)
+
+df_l_r_ti <- do.call(rbind, df_l_r_ti)
+df_l_r_ti <- df_l_r_ti[df_l_r_ti$`L-R` %in% l_r_pairs,]
+df_l_r_ti$`L-R` <- factor(df_l_r_ti$`L-R`, levels=l_r_pairs)
+
+  
+gg1 <- ggplot(df_l_r_ti, aes(x=Cells, y=`L-R`, col=mean)) + geom_point() + scale_color_viridis_c() + theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y=element_text(size=4)) +   scale_x_discrete(drop=FALSE)
+
+gg1 
+
+ggsave(gg1, file="../figures_lr/all_tumour_immune_specific.pdf", height=5, width=5)
+```
+
+
+```{r}
+df <- data.frame(UMAP1=reducedDim(sce, "UMAP")[, 1], UMAP2=reducedDim(sce, "UMAP")[, 2])
+df <- as.data.frame(cbind(df, colData(sce)))
+
+genes <- unlist(sapply(df_l_r_ti$`L-R`, function(x) unlist(strsplit(as.character(x),
+    "|", fixed=TRUE)[[1]]), simplify = FALSE))
+genes <- unique(genes)
+
+for(i in genes){
+
+  gg1 <- make_log_plot(sce, i, df, order=TRUE)
+  gg2 <- make_ind_plot(sce, i, df)
+  
+  ggsave(gg1, file=paste0("../figures_lr/", i, "_log_plot.jpg"))
+  ggsave(gg2, file=paste0("../figures_lr/", i, "_ind_plot.jpg"))
+  
+}  
+```
+
+```{r, fig.height=5, fig.width=5}
+df_l_r_tt <- lapply(tumour_interest, function(x) find_specific_comb(res_cell_comb,
+    tumour_interest, tumour_interest,
+    x, 1, res_gene_comb, res_pvalues, res_means))
+
+df_l_r_tt <- lapply(df_l_r_tt, function(x) x[x[,1]%in% l_r_pairs_known$lr_pair,]) 
+
+l_r_pairs <- lapply(df_l_r_tt, function(tmp) tmp %>% group_by(`L-R`) %>% summarize(mean=sum(mean)) %>% arrange(desc(mean)) %>%
+  dplyr::select(`L-R`) %>% slice(1:10))
+l_r_pairs <- unlist(l_r_pairs)
+
+df_l_r_tt <- do.call(rbind, df_l_r_tt)
+df_l_r_tt <- df_l_r_tt[df_l_r_tt$`L-R` %in% l_r_pairs,]
+df_l_r_tt$`L-R` <- factor(df_l_r_tt$`L-R`, levels=l_r_pairs)
+
+gg1 <- ggplot(df_l_r_tt, aes(x=Cells, y=`L-R`, col=mean)) + geom_point() + scale_color_viridis_c() + theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y=element_text(size=4)) +   scale_x_discrete(drop=FALSE)
+
+gg1
+
+ggsave(gg1, file="../figures_lr/all_tumour_tumour_specific.pdf", height=6,
+       width=5)
+```
+
+```{r}
+genes <- unlist(sapply(df_l_r_tt$`L-R`, function(x) unlist(strsplit(as.character(x),
+    "|", fixed=TRUE)[[1]]), simplify = FALSE))
+genes <- unique(genes)
+
+for(i in genes){
+
+  gg1 <- make_log_plot(sce, i, df, order=TRUE)
+  gg2 <- make_ind_plot(sce, i, df)
+  
+  ggsave(gg1, file=paste0("../figures_lr/", i, "_log_plot.jpg"))
+  ggsave(gg2, file=paste0("../figures_lr/", i, "_ind_plot.jpg"))
+  
+} 
+```
+
