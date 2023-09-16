@@ -1,0 +1,526 @@
+---
+title: "Annotate cell types"
+author: "Joel Moffet"
+date: "2023-09-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(SeuratObject)
+library(SingleR)
+library(ggplot2)
+library(SingleCellExperiment)
+library(pals)
+library(intrinsicDimension)
+library(reticulate)
+library(readxl)
+library(viridis)
+library(dplyr)
+library(magrittr)
+library(BiocParallel)
+library(BiocNeighbors)
+library(BiocSingular)
+library(bluster)
+library(scater)
+library(scuttle)
+library(scran)
+library(org.Hs.eg.db)
+library(ggrepel)
+
+use_virtualenv("r-reticulate")
+scrublet <- import("scrublet")
+
+source("../scripts/plotting.R")
+
+```
+
+```{r}
+colours_clusters <- polychrome(36)
+names(colours_clusters) <-1:36
+
+colours <- c("AC-like"="#91B8E1", "DC" = "#968131", "Endothelial" = "#000000",
+             "NPC-like"="#BA92F5", "Oligodendrocyte" = "#2FDE84", "OPC-like"= "#A6EECD", "RG"="#FCFFA1",
+             "TAM-BDM"="#5924D3","TAM-MG"="#C10BBB", "CD4/CD8"="#B13C27", "Neutrophil"="#52A652", "Mono"="#AB81CB", "Mural cell"="#929292",
+              "MES-like"="#E2726E", "Neuron" = "#FDD127", 'B cell' = "#FFB570", 'NK' = "#D15900",'CD8 T cell' = "#B13C27",
+             'CD4 T cell' = "#F1AB9B", 'Treg'="#FFB9E4",'BDM-LYVE1' = 'red','prolif-MES' = 'orange',"OPC"="#8FBFAA")
+
+cols_min <- c("Tumor"="indianred", "Immune"="#3D81EA", "Vasculature"="black", "Oligodendrocyte" = "#2FDE84",
+              "Neuron" = "#FDD127")
+
+colours_couturier <- c("Mesenchymal"="#E2726E", "Astro"="#8FBAEE", "Progenitor"="#FEFEB0",  "Oligo"="#B4F0D5","Neuronal"="#C6A8F6")
+
+tumour_sets <- c("AC-like", "NPC-like", "MES-like", "OPC-like", "RG", "prolif-MES")
+
+```
+
+
+## Load SingleCellExperiment 
+
+```{r, eval=FALSE}
+spe <- readRDS(paste0("../data/processed/spe_4174_2.rds"))
+```
+
+
+## Filter transcripts to only include those within nuclei boundaries
+
+
+```{r, eval=FALSE}
+actual_gene <- rowData(spe)$feature_type=="Gene Expression"
+spe <- spe[actual_gene,]
+
+large_tran <- read.csv2('../data/raw/G000385_SarahBest/Run1_30062023/output-XETG00068__0004174__Region_2__20230630__032701/transcripts.csv', sep = ',')
+smol_tran <- large_tran[large_tran$nucleus_distance == '0.0',]
+smol_tran <- smol_tran[as.numeric(smol_tran$qv)>=20,]
+
+smol_tran <- smol_tran[smol_tran$cell_id %in% spe$cell_id & smol_tran$feature_name %in% rownames(spe),]
+cell_list <- split(smol_tran$feature_name, smol_tran$cell_id)
+cell_list <- lapply(lapply(cell_list,factor,levels = rownames(spe)),table)
+cell_list <- lapply(cell_list, as.integer)
+cell_matrix <- matrix(unlist(cell_list), ncol = length(cell_list), byrow = F)
+colnames(cell_matrix) <- names(cell_list)
+rownames(cell_matrix) <- rownames(spe)
+sparse_mat <- as.sparse(cell_matrix)
+
+colnames(spe) <- spe$cell_id
+spe <- spe[, colnames(sparse_mat)]
+assay(spe, 'nuc_counts') <- sparse_mat
+
+rm(large_tran)
+rm(smol_tran)
+rm(cell_matrix)
+rm(cell_list)
+gc()
+
+spe <- spe[,colSums(assay(spe, 'nuc_counts'))>20]
+spe <- logNormCounts(spe, assay.type = 'nuc_counts')
+
+saveRDS(spe, '../data/processed/spe_4174_2.rds')
+```
+
+
+## Do dimension reduction
+
+We pick 23 dimensions for the PCA. 
+
+```{r, eval=FALSE}
+set.seed(0010101010)
+spe <- runPCA(spe, ncomponents=50,
+    BSPARAM=BiocSingular::IrlbaParam(),  BPPARAM=MulticoreParam(10))
+
+dim_est <- maxLikGlobalDimEst(reducedDim(spe, "PCA"), k=20, unbiased=TRUE)
+dim_est <- ceiling(dim_est$dim.est)
+print(dim_est)
+
+reducedDim(spe, "PCA") <- reducedDim(spe, "PCA")[,1:dim_est] 
+
+set.seed(0010101010)
+spe <- runUMAP(spe, dimred="PCA", name = 'UMAP',
+   BPPARAM=MulticoreParam(10), spread = 1, min_dist = 0.1)
+```
+
+## Clustering
+
+```{r, eval=FALSE}
+set.seed(0010101010)
+clust.leiden <- clusterCells(spe, use.dimred="PCA", 
+    BLUSPARAM=SNNGraphParam(k=40, type="rank", cluster.fun="leiden"))
+table(clust.leiden)
+colData(spe)$Cluster <- clust.leiden
+
+saveRDS(spe, file=paste0("../data/processed/spe_4174_2_processed.rds"))
+```
+
+```{r, include=FALSE}
+spe <- readRDS(paste0("../data/processed/spe_4174_2_processed.rds"))
+```
+
+## Use SingleR to annotate cells
+
+```{r, eval=FALSE}
+sc_gbm_big <- readRDS("../data/public_datasets/sc_gbm_big/sce_downsampled.rds")
+counts(sc_gbm_big) <- logcounts(sc_gbm_big)
+rownames(sc_gbm_big) <- rowData(sc_gbm_big)$feature_name
+
+available <- intersect(rownames(sc_gbm_big), rownames(spe))
+
+pred_labels <- SingleR(test=sce_slide[available,], ref=sc_gbm_big[available,], 
+    labels=sc_gbm_big$annotation_level_3, de.method="wilcox")
+table(pred_labels$labels)
+
+saveRDS(pred_labels, file="../data/prediction_4174_2.rds")
+```
+
+```{r, eval=FALSE}
+cout <- readRDS("../data/public_datasets/Deconvolution References/Couturier_dataset_tumor_lognormalised.rds")
+counts(cout) <- logcounts(cout)
+rownames(cout) <- rowData(cout)$Symbol
+
+available <- intersect(rownames(cout), rownames(sce_slide))
+
+cout_pred_labels <- SingleR(test=sce_slide[available,], ref=cout[available,], 
+    labels=cout$cluster, de.method="wilcox")    
+table(cout_pred_labels$labels)
+
+saveRDS(cout_pred_labels, file="../data/prediction_couturier_4174_2.rds")
+
+
+pred_tab <- apply(table(spe$Cluster, spe$pred_labels), 1, function(x) x/sum(x))
+
+cout_tab <- apply(table(spe$Cluster, spe$cout_labels), 1, function(x) x/sum(x))
+
+transfer_anno_cout <- factor(rownames(cout_tab)[apply(cout_tab, 2, which.max)])
+levels(transfer_anno_cout) <- c('AC-like', 'MES-like', 'NPC-like','OPC-like', 'RG')
+
+transfer_anno <- rownames(pred_tab)[apply(pred_tab, 2, which.max)]
+transfer_anno[transfer_anno %in% tumour_sets] <- as.character(transfer_anno_cout)[transfer_anno %in% tumour_sets]
+
+spe$nuc_Anno1 <- factor(spe$Cluster)
+levels(spe$nuc_Anno1) <- transfer_anno
+
+#manual adjustment of annotations after lack of significant differentiation between normal astrocyte and astrocytic tumor gene expression
+spe$nuc_Anno1 <- gsub('Astrocyte', 'AC-like', spe$nuc_Anno1)
+df$nuc_Anno1 <- spe$nuc_Anno1
+
+saveRDS(spe, file=paste0("../data/processed/spe_4174_2_processed.rds"))
+```
+
+##plot clusters
+
+```{r}
+
+df <- data.frame(UMAP1=reducedDim(spe, "UMAP")[, 1], UMAP2=reducedDim(spe, "UMAP")[, 2])
+df <- as.data.frame(cbind(df, colData(spe)))
+
+gg1 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2)) + 
+  geom_point(col="black", size=0.7) +
+  geom_point(col="white", size=0.4) +
+  geom_point(aes(col=Cluster), size=0.2, alpha=0.75) +
+  theme_void() + scale_color_manual(values=colours_clusters) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=3)))
+
+gg1
+
+ggsave(gg1, file="../figures/UMAP_pred_clusters_4174_2.jpg",  bg="white", height = 7, width = 10)  
+```
+
+## predicted labels
+
+```{r}
+gg2 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2)) + 
+  geom_point(col="black", size=0.7) +
+  geom_point(col="white", size=0.4) +
+  geom_point(aes(col=pred_labels), size=0.2, alpha=0.75) +
+  theme_void() + scale_color_manual(values=colours) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=3)))
+
+gg2
+
+gg3 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2)) + 
+  geom_point(col="black", size=0.7) +
+  geom_point(col="white", size=0.4) +
+  geom_point(aes(col=cout_labels), size=0.2, alpha=0.75) +
+  theme_void() + scale_color_manual(values=colours_couturier) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=3)))
+
+gg3
+  
+ggsave(gg2, file="../figures/UMAP_pred_labels_4174_2.jpg",  bg="white", height = 7, width = 10) 
+
+ggsave(gg3, file="../figures/UMAP_cout_labels_4174_2.jpg",  bg="white", height = 7, width = 10) 
+    
+ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2)) + 
+  geom_point(col="black", size=0.9) +
+  geom_point(col="white", size=0.5) +
+  geom_point(aes(col=nuc_Anno1), size=0.455, alpha=0.75) +
+  theme_void() + scale_color_manual(values=colours) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=3)))
+```
+
+
+##isolate and recluster tumor cells
+
+```{r}
+spe_tumour <- spe[,spe$nuc_Anno1 %in% tumour_sets]
+
+set.seed(0010101010)
+spe_tumour <- runPCA(spe_tumour, ncomponents=50,
+    BSPARAM=BiocSingular::IrlbaParam(),  BPPARAM=MulticoreParam(10))
+
+dim_est <- maxLikGlobalDimEst(reducedDim(spe_tumour, "PCA"), k=20, unbiased=TRUE)
+dim_est <- ceiling(dim_est$dim.est)
+print(dim_est)
+
+reducedDim(spe_tumour, "PCA") <- reducedDim(spe_tumour, "PCA")[,1:dim_est] 
+
+set.seed(0010101010)
+spe_tumour <- runUMAP(spe_tumour, dimred="PCA", name = 'UMAP',
+   BPPARAM=MulticoreParam(10), spread = 1, min_dist = 0.1)
+
+set.seed(0010101010)
+clust.leiden <- clusterCells(spe_tumour, use.dimred="PCA", 
+    BLUSPARAM=SNNGraphParam(k=30, type="rank", cluster.fun="leiden"))
+table(clust.leiden)
+colData(spe_tumour)$Cluster <- clust.leiden
+
+
+pred_tab <- apply(table(spe_tumour$Cluster, spe_tumour$pred_labels), 1, function(x) x/sum(x))
+
+cout_tab <- apply(table(spe_tumour$Cluster, spe_tumour$cout_labels), 1, function(x) x/sum(x))
+
+transfer_anno_cout <- factor(rownames(cout_tab)[apply(cout_tab, 2, which.max)])
+levels(transfer_anno_cout) <- c('AC-like', 'MES-like', 'NPC-like','OPC-like', 'RG')
+
+transfer_anno <- rownames(pred_tab)[apply(pred_tab, 2, which.max)]
+transfer_anno[transfer_anno %in% tumour_sets] <- as.character(transfer_anno_cout)[transfer_anno %in% tumour_sets]
+
+spe_tumour$nuc_Anno2 <- factor(spe_tumour$Cluster)
+levels(spe_tumour$nuc_Anno2) <- transfer_anno
+
+#manual adjustment of annotations after proliferating Mesenchymal cluster observed, 
+#and lack of significant differentiation between normal astrocyte and astrocytic tumor gene expression
+
+spe_tumour$nuc_Anno2 <- gsub('Astrocyte', 'AC-like', spe_tumour$nuc_Anno2)
+spe_tumour$nuc_Anno2[spe_tumour$Cluster == 74] <- 'prolif-MES'
+
+
+saveRDS(spe_tumour, file=paste0("../data/processed/spe_tumour_4174_2_processed.rds"))
+```
+
+
+##isolate and recluster immune cells
+
+```{r}
+spe_immune <- spe[,spe$nuc_Anno1 %in% c('TAM-BDM', 'TAM-MG', 'Mural cell', 'Neutrophil', 'CD4/CD8',
+                                                'Mono', 'DC', 'Mast', 'B cell', 'NK')]
+
+set.seed(0010101010)
+spe_immune <- runPCA(spe_immune, ncomponents=50,
+    BSPARAM=BiocSingular::IrlbaParam(),  BPPARAM=MulticoreParam(10))
+
+dim_est <- maxLikGlobalDimEst(reducedDim(spe_immune, "PCA"), k=20, unbiased=TRUE)
+dim_est <- ceiling(dim_est$dim.est)
+print(dim_est)
+
+reducedDim(spe_immune, "PCA") <- reducedDim(spe_immune, "PCA")[,1:dim_est] 
+
+set.seed(0010101010)
+spe_immune <- runUMAP(spe_immune, dimred="PCA", name = 'UMAP',
+   BPPARAM=MulticoreParam(10), spread = 1, min_dist = 0.1)
+
+set.seed(0010101010)
+clust.leiden <- clusterCells(spe_immune, use.dimred="PCA", 
+    BLUSPARAM=SNNGraphParam(k=30, type="rank", cluster.fun="leiden"))
+table(clust.leiden)
+colData(spe_immune)$Cluster <- clust.leiden
+
+
+pred_tab <- apply(table(spe_immune$Cluster, spe_immune$pred_labels), 1, function(x) x/sum(x))
+
+cout_tab <- apply(table(spe_immune$Cluster, spe_immune$cout_labels), 1, function(x) x/sum(x))
+
+transfer_anno_cout <- factor(rownames(cout_tab)[apply(cout_tab, 2, which.max)])
+levels(transfer_anno_cout) <- c('AC-like', 'MES-like', 'NPC-like','Unassigned')
+
+transfer_anno <- rownames(pred_tab)[apply(pred_tab, 2, which.max)]
+transfer_anno[transfer_anno %in% tumour_sets] <- as.character(transfer_anno_cout)[transfer_anno %in% tumour_sets]
+
+spe_immune$nuc_Anno2 <- factor(spe_immune$Cluster)
+levels(spe_immune$nuc_Anno2) <- transfer_anno
+
+#manual adjustment of annotations after LYVE1-positive BDM population observed
+spe_immune$nuc_Anno2[spe_immune$Cluster %in% c(7,8)] <- 'BDM-LYVE1'
+
+
+saveRDS(spe_immune, file=paste0("../data/processed/spe_immune_4174_2_processed.rds"))
+```
+
+##isolate and recluster lymphoid cells
+
+```{r}
+spe_lymphoid <- spe_immune[,spe_immune$nuc_Anno2 %in% c('CD4/CD8', 'DC')]
+
+set.seed(0010101010)
+spe_lymphoid <- runPCA(spe_lymphoid, ncomponents=50,
+    BSPARAM=BiocSingular::IrlbaParam(),  BPPARAM=MulticoreParam(10))
+
+dim_est <- maxLikGlobalDimEst(reducedDim(spe_lymphoid, "PCA"), k=20, unbiased=TRUE)
+dim_est <- ceiling(dim_est$dim.est)
+print(dim_est)
+
+reducedDim(spe_lymphoid, "PCA") <- reducedDim(spe_lymphoid, "PCA")[,1:dim_est] 
+
+set.seed(0010101010)
+spe_lymphoid <- runUMAP(spe_lymphoid, dimred="PCA", name = 'UMAP',
+   BPPARAM=MulticoreParam(10), spread = 1, min_dist = 0.1)
+
+set.seed(0010101010)
+clust.leiden <- clusterCells(spe_lymphoid, use.dimred="PCA", 
+    BLUSPARAM=SNNGraphParam(k=20, type="rank", cluster.fun="leiden"))
+table(clust.leiden)
+colData(spe_lymphoid)$Cluster <- clust.leiden
+
+
+pred_tab <- apply(table(spe_lymphoid$Cluster, spe_lymphoid$pred_labels), 1, function(x) x/sum(x))
+
+cout_tab <- apply(table(spe_lymphoid$Cluster, spe_lymphoid$cout_labels), 1, function(x) x/sum(x))
+
+transfer_anno_cout <- factor(rownames(cout_tab)[apply(cout_tab, 2, which.max)])
+levels(transfer_anno_cout) <- c('AC-like', 'MES-like')
+
+transfer_anno <- rownames(pred_tab)[apply(pred_tab, 2, which.max)]
+transfer_anno[transfer_anno %in% tumour_sets] <- as.character(transfer_anno_cout)[transfer_anno %in% tumour_sets]
+
+spe_lymphoid$nuc_Anno3 <- factor(spe_lymphoid$Cluster)
+levels(spe_lymphoid$nuc_Anno3) <- transfer_anno
+
+#manual adjustment of annotations after T cell markers investigated (FOXP3, CTLA4, CD8A, CD4, IL7R)
+spe_lymphoid$nuc_Anno3[spe_lymphoid$Cluster %in% c(1)] <- 'CD8 T cell'
+spe_lymphoid$nuc_Anno3[spe_lymphoid$Cluster %in% c(4,8)] <- 'CD4 T cell'
+spe_lymphoid$nuc_Anno3[spe_lymphoid$Cluster %in% c(5)] <- 'Treg'
+
+
+saveRDS(spe_lymphoid, file="../data/processed/spe_lymphoid_4174_2_processed.rds")
+```
+
+#Final and Broad Annotations
+
+```{r}
+spe$nuc_anno_final <- as.character(spe$nuc_Anno1)
+
+spe[,colnames(nuc_tumour)]$nuc_anno_final <- as.character(spe_tumour$nuc_Anno2)
+spe[,colnames(nuc_immune_only)]$nuc_anno_final <- as.character(spe_immune$nuc_Anno2)
+spe[,colnames(nuc_vasc)]$nuc_anno_final <- as.character(spe_lymphoid$nuc_Anno3)
+
+spe$final_anno_broad <- spe$nuc_anno_final
+spe$final_anno_broad[spe$final_anno_broad %in% c('Endothelial', 'Mural cell')] <- 'Vasculature'
+spe$final_anno_broad[spe$final_anno_broad %in% c(tumour_sets, 'prolif-MES')] <- 'Tumour'
+spe$final_anno_broad[spe$final_anno_broad %in% unique(c(spe_immune$nuc_Anno2, unique(spe_lymphoid$nuc_Anno3)))] <- 'Immune'
+
+df <- data.frame(UMAP1=reducedDim(spe, "UMAP")[, 1], UMAP2=reducedDim(spe, "UMAP")[, 2])
+df <- as.data.frame(cbind(df, colData(spe)))
+
+gg1 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2)) +
+  geom_point(col="black", size=0.9) +
+  geom_point(col="white", size=0.5) +
+  geom_point(aes(col=final_anno_broad), size=0.455, alpha=0.75) +
+  theme_void() + scale_colour_manual(values=cols_min) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=3)))
+
+gg1
+
+ggsave(gg1, file="../figures/UMAP_anno_broad.jpg",  bg="white")
+
+make_log_plot(spe, "PTPRC", df, order = T)
+make_log_plot(spe, "ERMN", df, order = T)
+make_log_plot(spe, "C1QL3", df, order = T)
+make_log_plot(spe, "IGFBP4", df, order = T)
+make_log_plot(spe, "PTPRZ1", df, order = T)
+
+
+df$x_centroid <- spatialCoords(spe)[,'x_centroid']   
+    
+df$y_centroid <- spatialCoords(spe)[,'y_centroid']  
+
+gg2 <- df[sample(1:nrow(df)),] %>%
+  ggplot(aes(x=x_centroid, y=y_centroid)) + 
+  geom_point(col="black", size=0.5) +
+  geom_point(col="white", size=0.3) +
+  geom_point(aes(col=nuc_anno_final), size=0.1, alpha=0.75, data = df[sample(which(df$nuc_anno_final %in% c(tumour_sets, 'prolif-MES'))),]) +
+  theme_void() + scale_color_manual(values=colours) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=3)))
+
+gg2
+
+ggsave(gg2, file="../figures/MAP_anno_tumour.jpg",  bg="white")
+
+gg3 <- df[sample(1:nrow(df)),] %>%
+  ggplot(aes(x=x_centroid, y=y_centroid)) + 
+  geom_point(col="black", size=0.5) +
+  geom_point(col="white", size=0.3) +
+  geom_point(aes(col=nuc_anno_final), size=0.1, alpha=0.75, data = df[sample(which(df$nuc_anno_final %in% c('MES-like', 'prolif-MES'))),]) +
+  theme_void() + scale_color_manual(values=colours) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=3)))
+
+gg3
+
+ggsave(gg3, file="../figures/MAP_anno_mes.jpg",  bg="white")
+
+gg4 <- df[sample(1:nrow(df)),] %>%
+  ggplot(aes(x=x_centroid, y=y_centroid)) + 
+  geom_point(col="black", size=0.5) +
+  geom_point(col="white", size=0.3) +
+  geom_point(aes(col=nuc_anno_final), size=0.1, alpha=0.75, data = df[sample(which(df$nuc_anno_final %in% c('AC-like', 'NPC-like', 'OPC-like', 'RG'))),]) +
+  theme_void() + scale_color_manual(values=colours) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=3)))
+
+gg4
+
+ggsave(gg4, file="../figures/MAP_anno_AOPN.jpg",  bg="white")
+```
+
+```{r}
+df <- data.frame(UMAP1=reducedDim(spe_tumour, "UMAP")[, 1], UMAP2=reducedDim(spe_tumour, "UMAP")[, 2])
+df <- as.data.frame(cbind(df, colData(spe_tumour)))
+
+gg1 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2)) +
+  geom_point(col="black", size=0.9) +
+  geom_point(col="white", size=0.5) +
+  geom_point(aes(col=nuc_Anno2), size=0.455, alpha=0.75) +
+  theme_void() + scale_colour_manual(values=colours) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=3)))
+
+gg1
+
+
+top_df <- data.frame(list(Annotation = rownames(table(spe_tumour$nuc_Anno2, as.numeric(counts(spe_tumour['TOP2A',]))>0)/
+rowSums(table(spe_tumour$nuc_Anno2, as.numeric(counts(spe_tumour['TOP2A',]))>0))),
+"Percent TOP2A" = (table(spe_tumour$nuc_Anno2, as.numeric(counts(spe_tumour['TOP2A',]))>0)/
+rowSums(table(spe_tumour$nuc_Anno2, as.numeric(counts(spe_tumour['TOP2A',]))>0)))[,'TRUE']))
+
+ggplot(top_df, aes(x = Annotation, y= Percent.TOP2A, fill = Annotation)) +geom_col() +theme_minimal() +scale_fill_manual(values = colours)
+
+gg3 <- make_ind_plot(spe_tumour, "TOP2A", df)
+
+gg3
+```
+
+```{r}
+df <- data.frame(UMAP1=reducedDim(spe_immune, "UMAP")[, 1], UMAP2=reducedDim(spe_immune, "UMAP")[, 2])
+df <- as.data.frame(cbind(df, colData(spe_immune)))
+
+gg1 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2)) +
+  geom_point(col="black", size=0.9) +
+  geom_point(col="white", size=0.5) +
+  geom_point(aes(col=nuc_Anno2), size=0.455, alpha=0.75) +
+  theme_void() + scale_colour_manual(values=colours) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=3)))
+
+gg1
+```
+
+```{r}
+df <- data.frame(UMAP1=reducedDim(spe_lymphoid, "UMAP")[, 1], UMAP2=reducedDim(spe_lymphoid, "UMAP")[, 2])
+df <- as.data.frame(cbind(df, colData(spe_lymphoid)))
+
+gg1 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2)) +
+  geom_point(col="black", size=0.9) +
+  geom_point(col="white", size=0.5) +
+  geom_point(aes(col=nuc_Anno3), size=0.455, alpha=0.75) +
+  theme_void() + scale_colour_manual(values=colours) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=3)))
+
+gg1
+```
+
+
+
+# save data
+
+```{r}
+saveRDS(spe, '../data/processed/spe_4174_2_processed.rds')
+```
+
+
+

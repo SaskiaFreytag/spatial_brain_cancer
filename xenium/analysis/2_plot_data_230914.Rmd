@@ -1,0 +1,64 @@
+---
+title: "Plot"
+author: "Joel Moffet"
+date: "2023-09-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(tidyverse)
+library(pals)
+```
+
+## Load Xenium data
+
+```{r}
+spe <- readRDS("../data/processed/spe_4174_1_processed.rds")
+
+
+df_polygons_nuc <- fread('../data/raw/G000385_SarahBest/Run1_30062023/output-XETG00068__0004174__Region_2__20230630__032701/nucleus_boundaries.csv.gz')
+df_polygons <- fread('../data/raw/G000385_SarahBest/Run1_30062023/output-XETG00068__0004174__Region_2__20230630__032701/cell_boundaries.csv.gz')
+
+df_polygons$Anno <- as.character(spe$nuc_anno_final[match(df_polygons$cell_id, spe$cell_id)])
+df_polygons$Anno[is.na(df_polygons$Anno)] <- "Not available"
+
+
+df_polygons_nuc$Anno <- as.character(spe$nuc_anno_final[match(df_polygons_nuc$cell_id, spe$cell_id)])
+df_polygons_nuc$Anno[is.na(df_polygons_nuc$Anno)] <- "Not available"
+```
+
+
+```{r}
+colours <- c("AC-like"="#91B8E1", "DC" = "#968131", "Endothelial" = "#000000",
+             "Mixed"="#B0B0B0", "NPC-like"="#BA92F5", "Oligodendrocyte" = "#2FDE84", "OPC-like"= "#A6EECD", "RG"="#FCFFA1",
+             "TAM-BDM"="#5924D3","TAM-MG"="#C10BBB", "CD4/CD8"="#B13C27", "Neutrophil"="#52A652", "Mono"="#AB81CB", "Mural cell"="#929292",
+              "MES-like"="#E2726E", "Neuron" = "#FDD127", 'B cell' = "#FFB570", 'NK' = "#D15900",'CD8 T cell' = "#B13C27",
+             'CD4 T cell' = "#F1AB9B", 'Treg'="#FFB9E4",'BDM-LYVE1' = 'red','prolif-MES' = 'orange', "OPC"="#8FBFAA")
+
+```
+
+
+
+# Make polygon plots
+
+
+```{r}
+plot_region <- function(xmin = 1000, ymin = 1000, interval = 756, save = F){
+gg2 <- df_polygons %>% filter(Anno != 'Not available')  %>% ggplot(aes(x = vertex_x, y = vertex_y)) + xlim(xmin,xmin+interval)+ ylim(ymin,ymin+interval)+
+geom_polygon(aes(fill = Anno, group = cell_id),
+colour="darkgrey", linewidth=0.15, alpha = 0.7) +
+geom_polygon(data = df_polygons_nuc[df_polygons_nuc$Anno!= 'Not available',], aes(fill = Anno, group = cell_id),
+colour="darkgrey", linewidth=0.15) +
+scale_fill_manual(values=colours) + theme_bw()
+if(save){
+ggsave(gg2,file = paste0("../figures/polygons_", xmin, "_", ymin, "_cellnuc.png"), height = 4.5, width = 7.5)}
+}
+
+plot_region(4000, 3000, save = T)
+plot_region(7000, 2000, save = T)
+```
+
+
+

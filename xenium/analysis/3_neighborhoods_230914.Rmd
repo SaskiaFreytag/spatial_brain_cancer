@@ -1,0 +1,112 @@
+---
+title: "Neighborhood analysis"
+author: "Joel Moffet"
+date: "2023-09-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(parallelDist)
+library(Seurat)
+library(tidyverse)
+library(parallel)
+library(pals)
+library(pheatmap)
+library(scater)
+library(scran)
+library(RColorBrewer)
+
+source("../scripts/tiling_par.R")
+```
+
+## Load data
+
+```{r}
+spe <- readRDS("../data/processed/spe_4174_2_processed.rds")
+
+```
+
+```{r}
+coord_df <- spatialCoords(spe)
+
+df_spe <- as.data.frame(counts(spe))
+df_spe <- cbind(t(df_spe), coord_df)
+df_spe <- cbind(df_spe, colData(spe))
+
+df_spe$Anno <-df_spe$nuc_anno_final
+
+df_spe$x_local_px <- df_spe$x_centroid
+df_spe$y_local_px <- df_spe$y_centroid
+```
+
+## Employ tiling 
+
+To ensure tiling is not influenced by cells that were excluded from analysis, I remove them.
+
+```{r}
+
+df_polygons <- df_spe
+df_polygons <- df_polygons[!df_polygons$Anno=="Not available",]
+df_polygons$Anno <- factor(df_polygons$Anno)
+df_polygons$fov <- df_polygons$id_sample
+df_polygons <- as.data.frame(df_polygons)
+```
+
+```{r}
+set.seed(12)
+num_clusters =8
+df_final <- find_niches(df_polygons, tile_height=160, tile_shift=40, image_size=c(10800,9100), num_clusters=num_clusters, prob = TRUE)
+gc()
+
+df_final$Cluster <- character(nrow(df_final))
+for(i in 1:nrow(df_final)){df_final$Cluster[i] <- which.max(df_final[i,5:(4+num_clusters)])}
+
+
+cols <- brewer.set1(9)
+names(cols) <- 1:9
+
+
+gg <- df_final %>% ggplot(aes(x = x_global, y = y_global, width=40, height =40)) +
+  geom_tile(aes(fill = Cluster, group = id)) + theme_bw() +
+   scale_fill_manual(values=cols)
+ 
+ ggsave(gg, file="../figures/8clusters_tiling_160_40_1474_2.pdf", height=12, width=19, bg="white")
+```
+
+# Identify cell types in each cluster
+
+```{r}
+
+tile_out <- apply(cbind(round_any(spatialCoords(spe), 40, floor), as.character(spe$id_sample)), 1, paste, collapse = "_")
+
+df_spe$tileout <- tile_out
+rownames(df_final) <- paste0(df_final$x, '_', df_final$y, '_', df_final$fov)
+spe$Tile <- df_final[tile_out,]$Cluster
+df_spe$Tile <- df_final[tile_out,]$Cluster
+
+lapply(split(df_spe$Anno, df_spe$Tile), table)
+```
+
+```{r}
+res <- table(df_spe$Tile, df_spe$Anno)
+res_enrich <- res/chisq.test(res)$expected
+
+pheatmap(res_enrich, color = c(rev(colorRampPalette(brewer.pal(9, "Blues"))(10)), 
+                               colorRampPalette(brewer.pal(9, "YlOrRd"))(9)), 
+         breaks=c(seq(0, 1, 0.1), seq(2, 5, 1), seq(6, 10, 1)))
+```
+
+
+
+# Save files
+
+```{r}
+saveRDS(spe, file="../data/processed/sce_4174_2_tiles.rds")
+
+```
+
+
+
+
+

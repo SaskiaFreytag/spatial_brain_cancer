@@ -3,6 +3,7 @@ library(Seurat)
 library(tidyverse)
 library(parallel)
 library(pals)
+library(parallelDist)
 
 cell_to_tile <- function(df_final, sce,  tile_shift, cores=10, prob=FALSE){
   
@@ -111,7 +112,7 @@ find_niches <- function(df_polygons, tile_height=1000, tile_shift=100,
   rownames(cells_in_tiles) <- paste0(all_tiles[,1], "_", all_tiles[,2], "_", all_tiles[,3])
   # find name for each tile 
   
-  dist_tiles <- vegdist(cells_in_tiles)
+  dist_tiles <- parDist(cells_in_tiles, method = 'bray', threads = cores)
   # calculate distance between tiles
   clusters <- hclust(dist_tiles, method="ward.D2")
   clusters <- cutree(clusters, k = num_clusters)

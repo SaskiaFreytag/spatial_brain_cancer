@@ -1,0 +1,182 @@
+---
+title: "Modularity Analysis"
+author: "Joel Moffet"
+date: "2023-09-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(reticulate)
+use_virtualenv("r-reticulate")
+knitr::knit_engines$set(python = reticulate::eng_python)
+
+library(SingleCellExperiment)
+library(pheatmap)
+library(ggplot2)
+library(magrittr)
+library(dplyr)
+library(igraph)
+library(RColorBrewer)
+library(pals)
+library(viridis)
+  
+source("../scripts/plotting.R")
+```
+
+## Load SingleCellExperiment
+
+```{r}
+spe <- readRDS("../data/processed/spe_4174_2.rds")
+
+barcodes <- spe$cell_id
+cluster <- spe$nuc_anno_final
+tile <- spe$Tile
+
+colours <- c("AC-like"="#91B8E1", "DC" = "#968131", "Endothelial" = "#000000",
+             "Mixed"="#B0B0B0", "NPC-like"="#BA92F5", "Oligodendrocyte" = "#2FDE84", "OPC-like"= "#A6EECD", "RG"="#FCFFA1",
+             "TAM-BDM"="#5924D3","TAM-MG"="#C10BBB", "CD4/CD8"="#B13C27", "Neutrophil"="#52A652", "Mono"="#AB81CB", "Mural cell"="#929292",
+              "MES-like"="#E2726E", "Neuron" = "#FDD127", 'B cell' = "#FFB570", 'NK' = "#D15900",'CD8 T cell' = "#B13C27",
+             'CD4 T cell' = "#F1AB9B", 'Treg'="#FFB9E4",'BDM-LYVE1' = 'red','prolif-MES' = 'orange', "OPC"="#8FBFAA")
+```
+
+## Load data into Python
+
+```{python}
+import scanpy as sc
+import squidpy as sq
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pathlib import Path
+import pandas as pd
+
+adata = sc.read_10x_mtx('../data/raw/ST/ST_230705/22BCRL058T_1_T_FFPE_ST_b14a5e47/cell_feature_matrix/')
+df = pd.read_csv("../data/raw/ST/ST_230705/22BCRL058T_1_T_FFPE_ST_b14a5e47/cells.csv.gz")
+
+df.set_index(adata.obs_names, inplace=True)
+df.index.tolist()
+adata.obs = df.copy()
+adata.obsm["spatial"] = adata.obs[["x_centroid", "y_centroid"]].copy().to_numpy()
+adata.obs
+
+sc.pp.normalize_total(adata, inplace=True)
+sc.pp.log1p(adata)
+
+adata = adata[r.barcodes].copy()
+adata.obs['cluster'] = pd.Categorical(r.cluster)
+adata.obs['tile'] = pd.Categorical(r.tile)
+```
+
+# Neighboorhood interactions and enrichment
+
+```{python}
+sq.gr.spatial_neighbors(
+    adata,
+    radius=30,
+    coord_type="generic",
+)
+
+sq.gr.nhood_enrichment(adata, cluster_key="cluster")
+sq.gr.interaction_matrix(adata, cluster_key="cluster")
+
+neighs = adata.obsp["spatial_connectivities"]
+```
+
+```{r}
+neighs <- py$neighs
+
+```
+
+```{python}
+adata.obsp["spatial_connectivities"] = r.neighs
+
+neighs = adata.obsp["spatial_connectivities"]
+```
+
+## Networks for each FOV
+
+```{r, fig.height=5, fig.width=5}
+collect_fovs  <- list()
+neighs <- py$neighs
+neighs <- neighs[!is.na(spe$Tile), !is.na(spe$Tile)]
+spe <- spe[, !is.na(spe$Tile)]
+ neighs_fov1 <- neighs
+
+
+  neighs_fov1 <- graph_from_adjacency_matrix(
+    neighs_fov1,
+    mode = c("undirected"),
+  )
+
+  V(neighs_fov1)$color <- colours[spe$filt_anno_full]
+
+  mem <- spe$filt_anno_full
+  all_cell_types <- unique(mem)
+  
+  mem_all <- lapply(all_cell_types, function(x) {
+    mem[mem!=x] <- "Other"
+    mem })
+  
+  collect_fovs <- sapply(mem_all, function(x) modularity(neighs_fov1, membership=as.numeric(as.factor(x))))
+  names(collect_fovs) <- all_cell_types
+```
+
+## Find modularity for each cell type.
+
+```{r}
+
+
+df_modularity_all <- data.frame(modularity=as.numeric(collect_fovs), cell_type=names(collect_fovs))
+
+gg1 <- ggplot(df_modularity_all, aes(x=cell_type, y=modularity, col=cell_type)) + 
+  geom_point(size=5) + theme_minimal() + scale_color_manual(values=colours)
+
+gg1
+
+ggsave(gg1, file="../figures/modularity_celltypes_s2.pdf", height=5, width=10)
+
+```
+
+##Extract modularity for only tumour cell types.
+
+```{r}
+sub_cell_types <- c("MES-like", "OPC-like", "AC-like", "AC-trans", "RG", "NPC-like", "prolif-MES")
+df_modularity <- df_modularity_all[df_modularity_all$cell_type %in% sub_cell_types,]
+
+
+
+gg1 <- ggplot(df_modularity, aes(x=cell_type, y=modularity, col=cell_type)) + 
+  geom_point(size=5) + theme_minimal() + scale_color_manual(values=colours)
+gg1
+
+
+ggsave(gg1, file="../figures/modularity_tumour_s2.pdf", height=5, width=10)
+```
+
+## Extract modularity for only non-tumour and vasculature cell types.
+
+```{r}
+sub_cell_types <- c("TAM-MG", "TAM-BDM", "Mono", "CD4 T cell", "CD8 T cell", "NK", "B cell", "BDM-LYVE1", "DC", "Neutrophil", "Treg")
+df_modularity <- df_modularity_all[df_modularity_all$cell_type %in% sub_cell_types, ,]
+
+gg1 <- ggplot(df_modularity, aes(x=cell_type, y=modularity, col=cell_type)) + 
+  geom_point(size=5) + theme_minimal() + scale_color_manual(values=colours)
+
+gg1
+ggsave(gg1, file="../figures/modularity_immune_s2.pdf", height=5, width=10)
+
+
+sub_cell_types <- c("Neuron", "Oligodendrocyte", "Endothelial", "Mural cell")
+df_modularity <- df_modularity_all[df_modularity_all$cell_type %in% sub_cell_types, ,]
+
+gg1 <- ggplot(df_modularity, aes(x=cell_type, y=modularity, col=cell_type)) + 
+  geom_point(size=5) + theme_minimal() + scale_color_manual(values=colours)
+
+gg1
+
+ggsave(gg1, file="../figures/modularity_normal_s2.pdf", height=5, width=10)
+
+
+```
+

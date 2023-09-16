@@ -23,36 +23,25 @@ source("../scripts/tiling.R")
 ## Load data
 
 ```{r}
-spe <- readRDS("../data/raw/SMI-0151_SarahBest_WEHI/6 Analysis/Data objects/seurat_object.Rds")
-index_jj98 <- grep("JJ98", colnames(spe), value=TRUE)
-
-meta <- read.csv("../data/raw/SMI-0151_SarahBest_WEHI/5 Raw data/JJ98/JJ98_metadata_file.csv")
-meta$cell_ID_new <- paste0(meta$fov, "_", meta$cell_ID)
+sce <- readRDS("../data/processed/sce_jj98_final.rds")
+anno <- readRDS("../data/processed/annotation_all.rds")
+sce$Anno <- anno$Annotation
+sce$Barcode <- sce$id
+sce$CenterX_local_px <- anno$CenterX_local_px
+sce$CenterY_local_px <- anno$CenterY_local_px
 ```
 
-```{r}
-coord_df <- as.data.frame(spe@images$JJ98$centroids@coords)
 
-df_spe <- as.data.frame(spe@assays$Nanostring@counts)
-df_spe <- cbind(t(df_spe[, index_jj98]), coord_df)
-df_spe <- cbind(df_spe, spe@meta.data[index_jj98,])
-
-anno <- readRDS("../data/annotation_all.rds")
-df_spe$Anno <- anno$Annotation
-
-df_spe$cell_ID_new <- paste0(df_spe$fov, "_", sapply(df_spe$cell_ID, function(x) strsplit(x, "_", fixed=TRUE)[[1]][4]))
-index <- match(df_spe$cell_ID_new, meta$cell_ID_new)
-
-df_spe$CenterX_local_px <- meta$CenterX_local_px[index]
-df_spe$CenterY_local_px <- meta$CenterY_local_px[index]
-```
 
 ```{r}
 df_polygons <- read.csv("../data/raw/SMI-0151_SarahBest_WEHI/5 Raw data/JJ98/JJ98-polygons.csv")
-df_polygons$cellID_new <- paste0(df_polygons$fov, "_", df_polygons$cellID)
+df_polygons$Barcode <- paste0("JJ98_", df_polygons$cellID, "_", df_polygons$fov)
 
-df_polygons$Anno <- df_spe$Anno[match(df_polygons$cellID_new, df_spe$cell_ID_new)]
-df_polygons$Anno[is.na(df_polygons$Anno)] <- "Not available"
+# put annotation 
+df_polygons$Anno <- sce$Anno[match(df_polygons$Barcode, sce$Barcode)]
+df_polygons <- df_polygons[!df_polygons$Anno=="Not available",]
+df_polygons$Anno <- factor(df_polygons$Anno)
+
 ```
 
 ## Employ tiling 
@@ -66,7 +55,8 @@ df_polygons$Anno <- factor(df_polygons$Anno)
 
 ```{r}
 set.seed(12)
-df_final <- find_niches(df_polygons, tile_height=500, tile_shift=100, image_size=4400, num_clusters=5)
+df_final <- find_niches(df_polygons, tile_height=500, tile_shift=100, image_size=4400, num_clusters=5,
+            cores=10, prob=FALSE)
 
 
 cols <- brewer.set1(9)
@@ -88,55 +78,15 @@ for(i in all_tiles){
 # Identify cell types in each cluster
 
 ```{r}
-df_final$fov <- as.numeric(df_final$fov)
+all_clusters <- cell_to_tile(df_final, sce, 100, cores=10, prob=FALSE)
+all_clusters <-  unlist(all_clusters)
 
-euclidean <- function(a, b) sqrt(sum((a - b)^2))
-
-identify_cell_in_tile <- function(df_spe_1, df_final_1, tile_height){
-  
-  df_tmp <- df_spe_1[, c("CenterX_local_px", "CenterY_local_px")]
-  df_tmp <- as.list(as.data.frame(t(df_tmp)))
-  names(df_tmp) <- df_spe_1$cell_ID
-  
-  cluster_tmp <- mclapply(df_tmp, function(start_tile) {
-    tmp <- apply(df_final_1[,c("x", "y")], 1, function(x) euclidean(x, start_tile))
-    df_final_1$Cluster[which.min(tmp)]
-  }, mc.cores=10)
-  
-  names(cluster_tmp)<- names(df_tmp)
-  cluster_tmp <- unlist(cluster_tmp)
-  
-  return(cluster_tmp)
-  
-}
-
-index <- split(1:nrow(df_final), df_final$fov)
-df_final_split <- lapply(index, function(x) df_final[x,]) 
-
-index <- split(1:nrow(df_spe), df_spe$fov)
-df_spe_split <- lapply(index, function(x) df_spe[x,]) 
-
-all_cluster <- mapply(Y = df_final_split, X = df_spe_split, function(X,Y) identify_cell_in_tile(X, Y, 100))
-index <- match(df_spe$cell_ID, unlist(lapply(all_cluster, names)))
-
-df_spe$Tile <- unlist(all_cluster)[index]
-df_polygons$Tile <- df_spe$Tile[match(df_polygons$cellID_new, df_spe$cell_ID_new)]
-
-for(i in unique(df_spe$fov)){
-  
-  gg1 <- df_spe %>% filter(fov==i) %>% ggplot(aes(x = CenterX_local_px, y = CenterY_local_px)) +
-    geom_point(aes(colour=Tile)) + scale_colour_manual(values=cols) + theme_bw()
-
-  ggsave(gg1, file=paste0("../figures/annotated_fov_", i, "_points_tiling.jpg"), height=5, width=5, bg="white")
-  
-}
-
-
-lapply(split(df_spe$Anno, df_spe$Tile), table)
+sce$Tile <- all_clusters[match(sce$Barcode, sapply(names(all_clusters), 
+            function(x) strsplit(x, ".", fixed=TRUE)[[1]][2]))]
 ```
 
 ```{r}
-res <- table(df_spe$Tile, df_spe$Anno)
+res <- table(sce$Tile, sce$Anno)
 res_enrich <- res/chisq.test(res)$expected
 
 pheatmap(res_enrich, color = c(rev(colorRampPalette(brewer.pal(9, "Blues"))(10)), 
@@ -147,10 +97,6 @@ pheatmap(res_enrich, color = c(rev(colorRampPalette(brewer.pal(9, "Blues"))(10))
 # Find genes expressed in tiles
 
 ```{r, fig.height=4, fig.width=3}
-sce <- readRDS("../data/sce_jj98.rds")
-sce$Tile <- df_spe$Tile
-
-
 markers <- findMarkers(sce, groups=sce$Tile, test.type="t", pval.type="all")
 markers_names_1 <- lapply(markers, function(x) rownames(x)[1:5])
 markers_names_1 <- lapply(1:length(markers_names_1), function(x) setdiff(markers_names_1[[x]], 
@@ -180,10 +126,10 @@ ggsave(gg1, file="../figures/Genes_tiles.jpg", height=7, width = 4, bg="white")
 # Save files
 
 ```{r}
-saveRDS(sce, file="../data/sce_jj98_tiles.rds")
+saveRDS(sce, file="../data/processed/sce_jj98_tiles.rds")
 
-sce <- readRDS("../data/sce_jj98_tiles.rds")
-anno <- readRDS("../data/annotation_all.rds")
+sce <- readRDS("../data/processed/sce_jj98_tiles.rds")
+anno <- readRDS("../data/processed/annotation_all.rds")
 sce$Anno <- anno$Annotation
 
 
@@ -191,7 +137,7 @@ res <- table(sce$Tile, sce$Anno)
 res_enrich <- res/chisq.test(res)$expected
 
 
-pdf("../figures/Enrichment_plot.pdf", width=7, height=5)
+pdf("../figures/enrichment_plot.pdf", width=7, height=5)
 pheatmap(res_enrich, color = c(rev(colorRampPalette(brewer.pal(9, "Blues"))(10)), 
                                colorRampPalette(brewer.pal(9, "YlOrRd"))(9)), 
          breaks=c(seq(0, 1, 0.1), seq(2, 5, 1), seq(6, 10, 1)))

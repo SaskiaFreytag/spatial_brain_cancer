@@ -1,0 +1,738 @@
+---
+title: "Annotate cell types"
+author: "Saskia Freytag"
+date: "2023-05-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(SeuratObject)
+library(SingleR)
+library(ggplot2)
+library(SingleCellExperiment)
+library(pals)
+library(intrinsicDimension)
+library(reticulate)
+library(readxl)
+library(viridis)
+library(dplyr)
+library(magrittr)
+library(BiocParallel)
+library(BiocNeighbors)
+library(BiocSingular)
+library(bluster)
+library(scater)
+library(scuttle)
+library(scran)
+library(org.Hs.eg.db)
+library(ggrepel)
+library(readxl)
+
+use_virtualenv("r-reticulate")
+scrublet <- import("scrublet")
+
+source("../scripts/plotting.R")
+
+```
+
+```{r}
+colours_clusters <- polychrome(36)
+names(colours_clusters) <-1:36
+
+colours_labels <- c("MES-like"="#E2726E", "Oligodendrocyte"="#3A4D45", "AC-like"="#8FBAEE", "Mural cell"="#929292", "Mono"="#AB81CB", "TAM-BDM"="#5C9EB7", "Astrocyte"="#5E7BA0", "OPC"="#8FBFAA", "CD4/CD8"="#B13C27", "Neutrophil"="#52A652", "Endothelial"="black", "RG"="#FEFEB0", "Mast"="#A6A2A7", "DC"="#3D8762","TAM-MG"="#3F76B2", "NK"="#E0A23D", "OPC-like"="#B4F0D5", "B cell"="#EABF43", "NPC-like"="#C6A8F6", "Plasma B"="#EBEBEB", "Neuron"="#8470A6")
+
+deconvolution_markers <- read_xlsx("../data/processed/deconvolution_signatures.xlsx")
+```
+
+# Set-up data
+
+## Load Seurat 
+
+```{r, eval=FALSE}
+spe <- readRDS("../data/raw/SMI-0151_SarahBest_WEHI/6 Analysis/Data objects/seurat_object.Rds")
+index_jj98 <- grep("JJ98", colnames(spe), value=TRUE)
+```
+
+
+## Make SingleCellExperiment
+
+We also remove MALAT1 as it drives results. Also remove negative control probes to ensure that these are not taken into account.
+
+We will also filter any cells that have less than 20 different detected genes. 
+
+```{r, eval=FALSE}
+sce_slide <- SingleCellExperiment(list(counts=spe@assays$Nanostring@counts[, index_jj98]),
+          colData=as(spe@meta.data[index_jj98,], "DataFrame"))
+
+sce_slide <- sce_slide[!rownames(sce_slide) %in% "MALAT1",]
+sce_slide <- sce_slide[!grepl("NegPrb", rownames(sce_slide)),]
+
+sce_slide <- sce_slide[,!sce_slide$nFeature_Nanostring<20]
+```
+
+## Do a log normalization
+
+```{r, eval=FALSE}
+sce_slide <- logNormCounts(sce_slide)
+```
+
+# Analysis for the entire dataset
+
+## Do dimension reduction
+
+We pick 19 dimensions for the PCA. 
+
+```{r, eval=FALSE}
+set.seed(0010101010)
+sce_slide <- runPCA(sce_slide, ncomponents=50,
+    BSPARAM=BiocSingular::IrlbaParam(),  BPPARAM=MulticoreParam(10))
+
+dim_est <- maxLikGlobalDimEst(reducedDim(sce_slide, "PCA"), k=20, unbiased=TRUE)
+dim_est <- ceiling(dim_est$dim.est)
+print(dim_est)
+
+reducedDim(sce_slide, "PCA") <- reducedDim(sce_slide, "PCA")[,1:dim_est] 
+
+set.seed(0010101010)
+sce_slide <- runUMAP(sce_slide, dimred="PCA", 
+   BPPARAM=MulticoreParam(10), spread = 3, min_dist = 0.1)
+```
+
+## Clustering
+
+Clustering is performed on the PCA with dimensions set as previously determined and then cluster using 20 nearest neighbors using a Leiden approach.  
+
+```{r, eval=FALSE}
+set.seed(0010101010)
+clust.leiden <- clusterCells(sce_slide, use.dimred="PCA", 
+    BLUSPARAM=SNNGraphParam(k=20, type="rank", cluster.fun="leiden"))
+table(clust.leiden)
+colData(sce_slide)$Cluster <- clust.leiden
+
+saveRDS(sce_slide, file="../data/processed/sce_jj98.rds")
+```
+
+```{r, include=FALSE}
+sce_slide <- readRDS("../data/processed/sce_jj98.rds")
+```
+
+## Investigate diversity of genes
+
+```{r}
+df <- data.frame(UMAP1=reducedDim(sce_slide, "UMAP")[, 1], UMAP2=reducedDim(sce_slide, "UMAP")[, 2])
+df <- as.data.frame(cbind(df, colData(sce_slide)))
+
+gg1 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2)) + 
+  geom_point(col="black", size=0.9) +
+  geom_point(col="white", size=0.5) +
+  geom_point(aes(col=log10(nCount_Nanostring)), size=0.455, alpha=0.75) +
+  theme_void() + 
+  scale_color_viridis_c()
+
+gg1
+
+ggsave(gg1, file="../figures/UMAP_counts.jpg",  bg="white")
+ 
+gg2 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2)) + 
+  geom_point(col="black", size=0.9) +
+  geom_point(col="white", size=0.5) +
+  geom_point(aes(col=log10(nFeature_Nanostring)), size=0.455, alpha=0.75) +
+  theme_void() + 
+  scale_color_viridis_c()
+
+gg2
+
+ggsave(gg2, file="../figures/UMAP_features.jpg",  bg="white")
+
+```
+
+```{r}
+deconvolution_markers$In <- deconvolution_markers$Gene %in% rownames(sce_slide)
+
+deconvolution_markers %>% group_by(Population) %>% summarise(sum_markers=sum(In))
+```
+
+
+## Use SingleR to annotate cells
+
+The annotation with the Ruiz-Moreno dataset will be used to annotate cells throughout, but will not be repeated for subsets.
+
+```{r, eval=FALSE}
+sc_gbm_big <- readRDS("/stornext/Bioinf/data/lab_brain_cancer/public_datasets/sc_gbm_big/sce_downsampled.rds")
+counts(sc_gbm_big) <- logcounts(sc_gbm_big)
+rownames(sc_gbm_big) <- rowData(sc_gbm_big)$feature_name
+
+available <- intersect(rownames(sc_gbm_big), rownames(sce_slide))
+
+pred_labels <- SingleR(test=sce_slide[available,], ref=sc_gbm_big[available,], 
+    labels=sc_gbm_big$annotation_level_3, de.method="wilcox", num.threads = 6)
+table(pred_labels$labels)
+
+saveRDS(pred_labels, file="../data/processed/prediction.rds")
+```
+
+```{r}
+pred_labels <- readRDS("../data/processed/prediction.rds")
+sce_slide$pred_labels <- pred_labels$labels
+
+tab <- apply(table(sce_slide$Cluster, sce_slide$pred_labels), 1, function(x) x/sum(x))
+write.csv(tab, file="../data/processed/prop_per_cluster.csv", quote=FALSE)
+```
+
+### Plot UMAPs
+
+```{r}
+df <- data.frame(UMAP1=reducedDim(sce_slide, "UMAP")[, 1], UMAP2=reducedDim(sce_slide, "UMAP")[, 2])
+df <- as.data.frame(cbind(df, colData(sce_slide)))
+
+gg1 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2)) + 
+  geom_point(col="black", size=0.9) +
+  geom_point(col="white", size=0.5) +
+  geom_point(aes(col=Cluster), size=0.455, alpha=0.75) +
+  theme_void() + 
+  scale_color_manual(values=colours_clusters[1:length(unique(df$Cluster))]) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=3)))
+
+gg1
+
+ggsave(gg1, file="../figures/UMAP_clusters.jpg",  bg="white")
+```
+
+```{r}
+gg1 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2)) + 
+  geom_point(col="black", size=0.9) +
+  geom_point(col="white", size=0.5) +
+  geom_point(aes(col=pred_labels), size=0.455, alpha=0.75) +
+  theme_void() + scale_color_manual(values=colours_labels) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=3)))
+
+gg1
+  
+ggsave(gg1, file="../figures/UMAP_pred_labels.jpg",  bg="white")  
+```
+
+```{r}
+make_log_plot(sce_slide, "PTPRC", df)
+gg1 <- make_ind_plot(sce_slide, "PTPRC", df)
+gg1
+
+ggsave(gg1, file="../figures/PTPRC_ind_all.jpg",  bg="white")
+
+gg1 <- make_log_plot(sce_slide, "CD163", df)
+gg1
+
+ggsave(gg1, file="../figures/CD163_all.jpg",  bg="white")
+
+gg1 <- make_log_plot(sce_slide, "CLU", df)
+gg1
+
+ggsave(gg1, file="../figures/CLU_all.jpg",  bg="white")
+
+gg1 <- make_log_plot(sce_slide, "COL4A2", df)
+gg1
+
+ggsave(gg1, file="../figures/COL4A2_all.jpg",  bg="white")
+
+```
+
+## Final annotation
+
+```{r}
+anno <- read_xlsx("../data/processed/annotation_broad.xlsx")
+
+sce_slide$Anno <- anno$Annotation[match(sce_slide$Cluster, anno$Cluster)]
+df$Anno <- sce_slide$Anno
+
+cols_min <- c("Tumour"="indianred", "Immune"="dodgerblue3", "Vasculature"="black", "Oligodendrocyte"="#3A4D45")
+
+
+gg1 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2)) +
+  geom_point(col="black", size=0.9) +
+  geom_point(col="white", size=0.5) +
+  geom_point(aes(col=Anno), size=0.455, alpha=0.75) +
+  theme_void() + scale_colour_manual(values=cols_min) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=3)))
+
+gg1
+
+ggsave(gg1, file="../figures/UMAP_anno_broad.jpg",  bg="white")
+
+```
+
+# Tumour only annotation
+
+## Split tumour cells
+
+```{r, eval=FALSE}
+sce_tumour <- sce_slide[, sce_slide$Anno %in% c("Tumour")]
+```
+
+```{r, include=FALSE}
+sce_tumour <- readRDS("../data/processed/sce_tumour_jj98.rds")
+```
+
+## Check gene diversity
+
+```{r}
+table(colSums(as.matrix(counts(sce_tumour[rownames(sce_tumour) %in% deconvolution_markers$Gene,])))>0)/ncol(sce_tumour)*100
+```
+
+## Dimension reduction
+
+We use 20 dimesions for the PCA of the reclustering of the tumour cells.
+
+```{r, eval=FALSE}
+set.seed(0010101010)
+sce_tumour <- runPCA(sce_tumour, ncomponents=50,
+    BSPARAM=BiocSingular::IrlbaParam(),  BPPARAM=MulticoreParam(10))
+
+dim_est <- maxLikGlobalDimEst(reducedDim(sce_tumour, "PCA"), k=20, unbiased=TRUE)
+dim_est <- ceiling(dim_est$dim.est)
+print(dim_est)
+
+reducedDim(sce_tumour, "PCA") <- reducedDim(sce_tumour, "PCA")[,1:dim_est] 
+
+set.seed(0010101010)
+sce_tumour <- runUMAP(sce_tumour, dimred="PCA", 
+   BPPARAM=MulticoreParam(10), spread = 1, min_dist = 0.1)
+```
+
+```{r, eval=FALSE}
+set.seed(0010101010)
+clust.leiden <- clusterCells(sce_tumour, use.dimred="PCA", 
+    BLUSPARAM=SNNGraphParam(k=20, type="rank", cluster.fun="leiden"))
+table(clust.leiden)
+colData(sce_tumour)$Cluster <- clust.leiden
+
+saveRDS(sce_tumour, file="../data/processed/sce_tumour_jj98.rds")
+```
+
+
+```{r}
+df <- data.frame(UMAP1=reducedDim(sce_tumour, "UMAP")[, 1], UMAP2=reducedDim(sce_tumour, "UMAP")[, 2])
+df <- as.data.frame(cbind(df, colData(sce_tumour)))
+
+gg1 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2)) + 
+  geom_point(col="black", size=1.5) +
+  geom_point(col="white", size=1) +
+  geom_point(aes(col=Cluster), size=0.955, alpha=0.75) +
+  theme_void() + scale_color_manual(values=colours_clusters[1:length(unique(df$Cluster))]) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=3)))
+
+gg1
+
+ggsave(gg1, file="../figures/UMAP_tumour_clusters.jpg",  bg="white")
+
+gg2 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2)) + 
+  geom_point(col="black", size=1.5) +
+  geom_point(col="white", size=1) +
+  geom_point(aes(col=pred_labels), size=0.955, alpha=0.75) +
+  theme_void() + scale_color_manual(values=colours_labels) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=3)))
+
+gg2
+
+ggsave(gg2, file="../figures/UMAP_tumour_pred_labels.jpg", bg="white")
+```
+
+```{r, eval=FALSE}
+tab <- apply(table(sce_tumour$Cluster, sce_tumour$pred_labels), 1, function(x) x/sum(x))
+write.csv(tab, file="../data/processed/prop_per_cluster_tumour.csv", quote=FALSE)
+```
+
+### Predict cell lables
+
+We will also perform an annotation with SingelR with the Couturier dataset set as a reference.
+
+```{r, eval=FALSE}
+sc_couturier <- readRDS("/stornext/Bioinf/data/lab_brain_cancer/public_datasets/Deconvolution References/Couturier_dataset_tumor.RDS")
+sc_couturier <- logNormCounts(sc_couturier)
+rownames(sc_couturier) <- rowData(sc_couturier)$Symbol
+
+available <- intersect(rownames(sc_couturier), rownames(sce_tumour))
+
+pred_labels <- SingleR(test=sce_tumour[available,], ref=sc_couturier[available,], 
+    labels=sc_couturier$cluster, de.method="wilcox", num.threads=6)
+table(pred_labels$labels)
+
+saveRDS(pred_labels, file="../data/processed/prediction_couturier.rds")
+```
+
+
+```{r}
+pred_labels <- readRDS("../data/processed/prediction_couturier.rds")
+
+colours_couturier <- c("Mesenchymal"="#E2726E", "Astro"="#8FBAEE", "Progenitor"="#FEFEB0",  "Oligo"="#B4F0D5","Neuronal"="#C6A8F6")
+
+sce_tumour$pred_labels1 <- pred_labels$labels
+df$pred_labels1 <- sce_tumour$pred_labels1
+
+gg1 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2)) + 
+  geom_point(col="black", size=1.5) +
+  geom_point(col="white", size=1) +
+  geom_point(aes(col=pred_labels1), size=0.955, alpha=0.75) +
+  theme_void() + scale_colour_manual(values=colours_couturier) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=3)))
+
+gg1 
+
+ggsave(gg1, file="../figures/UMAP_tumour_couturier.jpg",  bg="white")
+  
+tab <- apply(table(sce_tumour$Cluster, sce_tumour$pred_labels1), 1, function(x) x/sum(x))
+write.csv(tab, file="../data/processed/prop_per_cluster_tumour_couturier.csv", quote=FALSE)
+```
+
+## TOP2A
+
+```{r}
+make_log_plot(sce_tumour, "TOP2A", df)
+gg1 <- make_log_plot(sce_tumour, "TOP2A", df)
+gg1
+
+ggsave(gg1, file="../figures/TOP2A_log_tumour.jpg",  bg="white")
+
+gg1 <- make_log_plot(sce_tumour, "APOD", df)
+gg1
+
+ggsave(gg1, file="../figures/APOD_log_tumour.jpg",  bg="white")
+
+
+gg1 <- make_log_plot(sce_tumour, "NTRK2", df)
+gg1
+
+ggsave(gg1, file="../figures/NTRK2_log_tumour.jpg",  bg="white")
+
+gg1 <- make_log_plot(sce_tumour, "CHI3L1", df)
+gg1
+
+ggsave(gg1, file="../figures/CHI3L1_log_tumour.jpg",  bg="white")
+
+
+gg1 <- make_log_plot(sce_tumour, "STMN1", df)
+gg1
+
+ggsave(gg1, file="../figures/STMN1_log_tumour.jpg",  bg="white")
+
+```
+
+## Final annotation
+
+```{r}
+anno <- read_xlsx("../data/processed/annotation_tumour.xlsx")
+
+sce_tumour$Anno <- anno$Annotation[match(sce_tumour$Cluster, anno$Cluster)]
+df$Anno <- sce_tumour$Anno
+
+colours_new <- c("Mesenchymal"="#E2726E", "Astro"="#8FBAEE", "Progenitor/Neuronal/Oligo"="#E5F9BC")
+
+gg1 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2)) +
+  geom_point(col="black", size=0.9) +
+  geom_point(col="white", size=0.5) +
+  geom_point(aes(col=Anno), size=0.455, alpha=0.75) +
+  theme_void() + scale_colour_manual(values=colours_new) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=3)))
+
+gg1
+
+ggsave(gg1, file="../figures/UMAP_anno_tumour.jpg",  bg="white")
+
+```
+
+```{r}
+gg1 <- df %>%
+  dplyr::count(Anno, orig.ident) %>%       
+  dplyr::group_by(orig.ident) %>%
+  dplyr::mutate(pct= prop.table(n) * 100) %>%
+  ggplot(aes(y=orig.ident, x=pct, fill=Anno)) +
+  geom_bar(stat="identity") + scale_fill_manual(values= colours_new) +
+  theme_bw()
+
+gg1
+
+ggsave(gg1, file="../figures/Prop_tumour.pdf", height=2, width=7)
+```
+
+```{r}
+df$TOP2A <- as.vector(t(counts(sce_tumour["TOP2A",])>0))
+  
+gg1 <- df %>%
+  dplyr::count(Anno, TOP2A) %>%       
+  dplyr::group_by(Anno) %>%
+  dplyr::mutate(pct= prop.table(n) * 100) %>%
+  dplyr::filter(TOP2A) %>% 
+  ggplot(aes(y=pct, x=Anno, fill=Anno)) +
+  geom_bar(stat="identity", colour="black") + scale_fill_manual(values= colours_new) +
+  theme_bw()
+
+gg1
+
+ggsave(gg1, file="../figures/Prop_TOP2A_tumour.pdf", height=2, width=7)
+```
+
+# Immune only annotation
+
+```{r, eval=FALSE}
+sce_immune <- sce_slide[, sce_slide$Anno=="Immune"]
+```
+
+## Dimension reduction
+
+We use 19 dimensions for the PCA in the reclustering of immune cells.
+
+```{r, eval=FALSE}
+set.seed(0010101010)
+sce_immune <- runPCA(sce_immune, ncomponents=50,
+    BSPARAM=BiocSingular::IrlbaParam(),  BPPARAM=MulticoreParam(10))
+
+dim_est <- maxLikGlobalDimEst(reducedDim(sce_immune, "PCA"), k=20, unbiased=TRUE)
+dim_est <- ceiling(dim_est$dim.est)
+print(dim_est)
+
+reducedDim(sce_immune, "PCA") <- reducedDim(sce_immune, "PCA")[,1:dim_est] 
+
+set.seed(0010101010)
+sce_immune <- runUMAP(sce_immune, dimred="PCA", 
+   BPPARAM=MulticoreParam(10), spread = 1, min_dist = 0.01)
+```
+
+## Clustering
+
+Clustering is performed on the PCA with dimensions set as previously determined and then cluster using 12 nearest neighbors using a Leiden approach.  
+
+```{r, eval=FALSE}
+set.seed(0010101010)
+clust.leiden <- clusterCells(sce_immune, use.dimred="PCA", 
+    BLUSPARAM=SNNGraphParam(k=12, type="rank", cluster.fun="leiden"))
+table(clust.leiden)
+colData(sce_immune)$Cluster <- clust.leiden
+
+saveRDS(sce_immune, file="../data/processed/sce_immune_jj98.rds")
+```
+
+```{r, include=FALSE}
+sce_immune <- readRDS("../data/processed/sce_immune_jj98.rds")
+```
+
+### Plot UMAPs
+
+```{r}
+df <- data.frame(UMAP1=reducedDim(sce_immune, "UMAP")[, 1], UMAP2=reducedDim(sce_immune, "UMAP")[, 2])
+df <- as.data.frame(cbind(df, colData(sce_immune)))
+
+gg1 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2)) + 
+  geom_point(col="black", size=1.5) +
+  geom_point(col="white", size=1) +
+  geom_point(aes(col=Cluster), size=0.955, alpha=0.75) + theme_void() + scale_color_manual(values=colours_clusters[1:length(unique(df$Cluster))]) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=3)))
+
+gg1
+
+ggsave(gg1, file="../figures/UMAP_immune_clusters.jpg",  bg="white")
+
+gg2 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2)) + geom_point(col="black", size=1.5) +
+  geom_point(col="white", size=1) +
+  geom_point(aes(col=pred_labels), size=0.955, alpha=0.75) + theme_void() + 
+  scale_color_manual(values=colours_labels) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=3)))
+
+gg2
+
+ggsave(gg2, file="../figures/UMAP_immune_pred_labels.jpg",  bg="white")
+```
+
+```{r, eval=FALSE}
+tab <- apply(table(sce_immune$Cluster, sce_immune$pred_labels), 1, function(x) x/sum(x))
+write.csv(tab, file="../data/processed/prop_per_cluster_immune.csv", quote=FALSE)
+```
+
+```{r}
+gg1 <- make_ind_plot(sce_immune, "AHR", df)
+
+gg1
+
+ggsave(gg1, file="../figures/AHR_ind_immune.jpg", bg="white", height=5, width=5)
+```
+## Annotate cells
+
+```{r}
+anno <- read_xlsx("../data/processed/annotation_immune.xlsx")
+
+sce_immune$Anno <- anno$Annotation[match(sce_immune$Cluster, anno$Cluster)]
+df$Anno <- sce_immune$Anno
+
+gg1 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2))  + 
+  geom_point(col="black", size=1.5) +
+  geom_point(col="white", size=1) +
+  geom_point(aes(col=Anno), size=0.955, alpha=0.75) +
+  theme_void() + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=3))) + 
+  scale_color_manual(values=colours_labels) 
+
+gg1
+
+ggsave(gg1, file="../figures/UMAP_immune.jpg", bg="white")
+```
+## Recluster with only immune cells
+
+Since we identified a population of mesenchymal-like cells in the immune population, we remove these and perform clustering again. For this we use 18 dimensions.
+
+### Dimension reduction
+
+```{r, eval=FALSE}
+sce_immune <- sce_immune[, sce_immune$Anno %in% c("CD4/CD8", "DC", "Mono", "TAM-BDM", "TAM-MG") ]
+
+set.seed(0010101010)
+sce_immune <- runPCA(sce_immune, ncomponents=50,
+    BSPARAM=BiocSingular::IrlbaParam(),  BPPARAM=MulticoreParam(10))
+
+dim_est <- maxLikGlobalDimEst(reducedDim(sce_immune, "PCA"), k=20, unbiased=TRUE)
+dim_est <- ceiling(dim_est$dim.est)
+print(dim_est)
+
+reducedDim(sce_immune, "PCA") <- reducedDim(sce_immune, "PCA")[,1:dim_est] 
+
+set.seed(0010101010)
+sce_immune <- runUMAP(sce_immune, dimred="PCA", 
+   BPPARAM=MulticoreParam(10), spread = 1, min_dist = 0.01)
+
+saveRDS(sce_immune, file="../data/processed/sce_immune_jj98_only.rds")
+```
+
+```{r, include=FALSE}
+sce_immune <- readRDS("../data/processed/sce_immune_jj98_only.rds")
+```
+
+### Plot UMAPs
+
+```{r}
+df <- data.frame(UMAP1=reducedDim(sce_immune, "UMAP")[, 1], UMAP2=reducedDim(sce_immune, "UMAP")[, 2])
+df <- as.data.frame(cbind(df, colData(sce_immune)))
+
+gg1 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2))  + 
+  geom_point(col="black", size=1.5) +
+  geom_point(col="white", size=1) +
+  geom_point(aes(col=Anno), size=0.955, alpha=0.75) +
+  theme_void() + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=3))) + 
+  scale_color_manual(values=colours_labels) 
+
+gg1
+
+ggsave(gg1, file="../figures/UMAP_immune_only.jpg", bg="white")
+```
+
+
+```{r}
+gg3 <- df %>%
+  dplyr::count(Anno, orig.ident) %>%   
+  dplyr::group_by(orig.ident) %>%
+  dplyr::mutate(pct= prop.table(n) * 100) %>%
+  ggplot(aes(y=orig.ident, x=pct, fill=Anno)) +
+  geom_bar(stat="identity", colour="black") + scale_fill_manual(values= colours_labels) +
+  theme_bw()
+
+
+gg3
+ggsave(gg3, file="../figures/Prop_immune.pdf", height=2, width=7)
+```
+
+```{r}
+gg1 <- make_ind_plot(sce_immune, "AHR", df)
+gg1
+
+ggsave(gg1, file="../figures/AHR_ind_immune.jpg", bg="white")
+```
+
+# Putting annotation together
+
+```{r}
+anno_df <- data.frame(Barcode=colnames(sce_slide), Annotation=sce_slide$Anno)
+index_immune <- match(colnames(sce_immune), anno_df$Barcode)
+anno_df$Annotation[index_immune] <- sce_immune$Anno
+index_tumour <- match(colnames(sce_tumour), anno_df$Barcode)
+anno_df$Annotation[index_tumour] <- sce_tumour$Anno
+anno_df$Annotation[anno_df$Annotation=="Immune"] <- "Mesenchymal"
+
+colours <- c("Mesenchymal"="#E2726E", "Astro"="#8FBAEE", "Progenitor/Neuronal/Oligo"="#E5F9BC",
+             "Vasculature"="black",  "Oligodendrocyte"="#3A4D45", "Mono"="#AB81CB", "TAM-BDM"="#5C9EB7",  "CD4/CD8"="#B13C27","TAM-MG"="#3F76B2")
+
+sce_slide$Anno_final <- anno_df$Annotation
+
+df <- data.frame(UMAP1=reducedDim(sce_slide, "UMAP")[, 1], UMAP2=reducedDim(sce_slide, "UMAP")[, 2])
+df <- as.data.frame(cbind(df, colData(sce_slide)))
+
+gg1 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2)) + 
+  geom_point(col="black", size=0.9) +
+  geom_point(col="white", size=0.5) +
+  geom_point(aes(col=Anno_final), size=0.455, alpha=0.75) +
+  theme_void() + 
+  scale_color_manual(values=colours) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size=3)))
+
+gg1
+
+ggsave(gg1, file="../figures/UMAP_full_anno.jpg", bg="white")
+
+saveRDS(sce_slide, file="../data/processed/sce_jj98_final.rds")
+
+saveRDS(anno_df, file="../data/annotation_all.rds")
+```
+
+## Investigate cell cycle
+
+```{r}
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+s.genes <- intersect(rownames(sce_slide), s.genes)
+s.genes 
+g2m.genes <- intersect(rownames(sce_slide), g2m.genes)
+g2m.genes 
+
+sce_tumour_seurat <- as.Seurat(sce_slide)
+
+cell_cycle <- CellCycleScoring(sce_tumour_seurat, 
+    s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+
+df$Sphase <- cell_cycle$S.Score
+df$G2Mphase <- cell_cycle$G2M.Score
+
+gg1 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2, col=Sphase)) + geom_point(alpha=1, size=0.5) + theme_classic() + scale_color_viridis()
+
+gg1
+
+gg2 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2, col=G2Mphase)) + geom_point(alpha=1, size=0.5) + theme_classic() + scale_color_viridis()
+
+gg2
+
+ggsave(gg1, file="../figures/Sphase_tumour.jpg",  bg="white")
+ggsave(gg1, file="../figures/G2Mphase_tumour.jpg",  bg="white")
+```
+
+## Investigate hypoxia
+
+```{r}
+tab <- AnnotationDbi::select(org.Hs.eg.db, keytype="SYMBOL", keys=rownames(sce_slide), columns="GOALL")
+by.go <- split(tab[,1], tab[,2])
+
+by_go_hypoxia <- by.go["GO:0001666"]
+
+aggregated <- sumCountsAcrossFeatures(sce_slide, by_go_hypoxia,
+    exprs_values="logcounts", average=FALSE)
+
+df$hypoxia <- aggregated[1,]
+
+gg2 <- ggplot(df[sample(1:nrow(df)),], aes(x=UMAP1, y=UMAP2, col=hypoxia)) + geom_point(alpha=1, size=0.5) + theme_classic() + scale_color_viridis() 
+
+gg2
+
+ggsave(gg2, file="../figures/hypoxia.jpg",  bg="white")
+
+df %>% group_by(Anno_final, fov) %>% summarize(average_hypoxia=mean(hypoxia))
+```
+
+
+
+

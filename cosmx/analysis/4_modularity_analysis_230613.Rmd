@@ -1,0 +1,238 @@
+---
+title: "Modularity Analysis"
+author: "Saskia Freytag"
+date: "2023-06-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(reticulate)
+use_virtualenv("r-reticulate")
+knitr::knit_engines$set(python = reticulate::eng_python)
+
+library(SingleCellExperiment)
+library(pheatmap)
+library(ggplot2)
+library(magrittr)
+library(dplyr)
+library(igraph)
+library(RColorBrewer)
+library(pals)
+library(viridis)
+
+source("../scripts/plotting.R")
+```
+
+## Load SingleCellExperiment
+
+```{r}
+sce <- readRDS("../data/processed/sce_jj98_tiles.rds")
+sce$Barcode <- paste0("JJ98_", sapply(sce$cell_ID, function(x) strsplit(x, "_", fixed=TRUE)[[1]][4]), "_", sce$fov)
+
+meta <- read.csv("../data/raw/SMI-0151_SarahBest_WEHI/5 Raw data/JJ98/JJ98_metadata_file.csv")
+meta$Barcode <- paste0("JJ98_", meta$cell_ID, "_", meta$fov)
+
+barcodes <- gsub("JJ98_", "", sce$Barcode)
+cluster <- sce$Anno_final
+tile <- sce$Tile
+
+colours <- c("Mesenchymal"="#E2726E", "Astro"="#8FBAEE", "Progenitor/Neuronal/Oligo"="#E5F9BC",
+             "Vasculature"="black", "Oligodendrocyte"="#3A4D45", "Mono"="#AB81CB", 
+             "TAM-BDM"="#5C9EB7",  "CD4/CD8"="#B13C27","TAM-MG"="#3F76B2")
+```
+
+## Load data into Python
+
+```{python}
+import scanpy as sc
+import squidpy as sq
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pathlib import Path
+import pandas as pd
+
+adata = sq.read.nanostring(
+    path="../data/raw/SMI-0151_SarahBest_WEHI/5 Raw data/JJ98/",
+    counts_file="JJ98_exprMat_file.csv",
+    meta_file="JJ98_metadata_file.csv",
+    fov_file="JJ98_fov_positions_file.csv",
+)
+
+sc.pp.normalize_total(adata, inplace=True)
+sc.pp.log1p(adata)
+
+adata = adata[r.barcodes].copy()
+adata.obs['cluster'] = pd.Categorical(r.cluster)
+adata.obs['tile'] = pd.Categorical(r.tile)
+```
+
+# Neighboorhood interactions and enrichment
+
+```{python}
+sq.gr.spatial_neighbors(
+    adata,
+    radius=179,
+    coord_type="generic",
+)
+
+sq.gr.nhood_enrichment(adata, cluster_key="cluster")
+sq.gr.interaction_matrix(adata, cluster_key="cluster")
+
+neighs = adata.obsp["spatial_connectivities"]
+```
+
+```{r}
+neighs <- py$neighs
+blocks <- lapply(unique(sce$fov), function(x) expand.grid(which(sce$fov==x), which(sce$fov!=x)))
+blocks <- as.matrix(do.call(rbind, blocks))
+
+neighs[blocks] <- 0
+```
+
+```{python}
+adata.obsp["spatial_connectivities"] = r.neighs
+
+neighs = adata.obsp["spatial_connectivities"]
+```
+
+## Networks for each FOV
+
+```{r, fig.height=5, fig.width=5}
+collect_fovs  <- list()
+neighs <- py$neighs
+
+
+for(i in unique(sce$fov)){
+
+  neighs_fov1 <- neighs[sce$fov==i, sce$fov==i]
+
+  neighs_fov1 <- graph_from_adjacency_matrix(
+    neighs_fov1,
+    mode = c("undirected"),
+  )
+
+  V(neighs_fov1)$color <- colours[sce$Anno_final[sce$fov==i]]
+
+  set.seed(10)
+  pdf(paste0("../figures/network_fov", i, ".pdf"))
+    plot(neighs_fov1, vertex.label=NA, vertex.size=1.5, 
+       vertex.frame.color=NA, edge.width=1)
+  dev.off()
+
+  mem <- sce$Anno_final[sce$fov==i]
+  all_cell_types <- unique(mem)
+  
+  mem_all <- lapply(all_cell_types, function(x) {
+    mem[mem!=x] <- "Other"
+    mem })
+  
+  collect_fovs[[i]] <- sapply(mem_all, function(x) modularity(neighs_fov1,                membership=as.numeric(as.factor(x))))
+  names(collect_fovs[[i]]) <- all_cell_types
+}
+```
+
+Find modularity for each cell type.
+
+```{r}
+df_modularity_all <- data.frame(modularity=as.numeric(unlist(collect_fovs)), cell_type=unlist(lapply(collect_fovs, names)),
+          fov=as.factor(rep(unique(sce$fov), lengths(collect_fovs)[lengths(collect_fovs)!=0])))
+
+gg1 <- ggplot(df_modularity_all, aes(x=fov, y=modularity, col=cell_type)) + 
+  geom_jitter(size=2) + theme_minimal() + scale_color_manual(values=colours)
+
+gg1
+```
+
+Extract modularity for only tumour cell types.
+
+```{r}
+sub_cell_types <- c("Mesenchymal", "Progenitor/Neuronal/Oligo", "Astro")
+df_modularity <- df_modularity_all[df_modularity_all$cell_type %in% sub_cell_types,]
+
+df_summary <- df_modularity %>% group_by(cell_type) %>% summarize( sd_mod=sd(modularity), modularity=mean(modularity))
+
+gg1 <- ggplot(data=df_modularity, aes(x=cell_type, y=modularity, col=cell_type))  + scale_color_manual(values=colours) +
+  geom_pointrange(aes(ymin = modularity-sd_mod, ymax = modularity+sd_mod, color=cell_type), data = df_summary, size=1.2, linewidth=1.5) +   geom_jitter(position = position_jitter(0.2), size=2, alpha=0.75) + theme_minimal()
+
+gg1
+ggsave(gg1, file="../figures/modularity_tumour.pdf", height=5, width=5)
+```
+
+Implement testing.
+
+```{r}
+t.test(df_modularity$modularity[df_modularity$cell_type=="Astro"],
+       df_modularity$modularity[df_modularity$cell_type=="Mesenchymal"])
+t.test(df_modularity$modularity[df_modularity$cell_type=="Astro"],
+       df_modularity$modularity[df_modularity$cell_type=="Progenitor/Neuronal/Oligo"])
+
+t.test(df_modularity$modularity[df_modularity$cell_type=="Progenitor/Neuronal/Oligo"],
+       df_modularity$modularity[df_modularity$cell_type=="Mesenchymal"])
+```
+
+Extract modularity for only non-tumour and vasculature cell types.
+
+```{r}
+sub_cell_types <- c("TAM-MG", "TAM-BDM", "Mono", "CD4/CD8")
+df_modularity <- df_modularity_all[df_modularity_all$cell_type %in% sub_cell_types,]
+
+gg1 <- ggplot(df_modularity, aes(x=fov, y=modularity, col=cell_type)) + 
+  geom_jitter(size=2) + theme_minimal() + scale_color_manual(values=colours)
+
+gg1
+
+
+df_summary <- df_modularity %>% group_by(cell_type) %>% summarize( sd_mod=sd(modularity), modularity=mean(modularity))
+
+gg1 <- ggplot(data=df_modularity, aes(x=cell_type, y=modularity, col=cell_type))  + scale_color_manual(values=colours) +
+  geom_pointrange(aes(ymin = modularity-sd_mod, ymax = modularity+sd_mod, color=cell_type), data = df_summary, size=1.2, linewidth=1.5) +   geom_jitter(position = position_jitter(0.2), size=2, alpha=0.75) + theme_minimal()
+
+
+gg1
+
+ggsave(gg1, file="../figures/modularity_immune.pdf", height=5, width=5)
+```
+
+## Networks for each neighborhood
+
+```{r, fig.height=5, fig.width=5}
+collect_tiles  <- list()
+
+for(i in unique(sce$Tile)){
+
+  neighs_fov1 <- neighs[sce$Tile==i, sce$Tile==i]
+
+  neighs_fov1 <- graph_from_adjacency_matrix(
+    neighs_fov1,
+    mode = c("undirected"),
+  )
+
+  V(neighs_fov1)$color <- colours[sce$Anno_final[sce$Tile==i]]
+
+  set.seed(10)
+  pdf(paste0("../figures/network_neighborhood", i, ".pdf"))
+  plot(neighs_fov1, vertex.label=NA, vertex.size=1.5, 
+       vertex.frame.color=NA, edge.width=0.1)
+  dev.off()
+
+  mem <- sce$Anno_final[sce$Tile==i]
+  
+  collect_tiles[[i]] <- modularity(neighs_fov1, membership=as.numeric(as.factor(mem)))
+}
+```
+
+```{r}
+cols <- brewer.set1(9)
+names(cols) <- 1:9
+
+df_tiles <- data.frame(tiles=names(collect_tiles),
+            modularity=unlist(collect_tiles))
+
+gg1 <- ggplot(df_tiles, aes(x=tiles, y=modularity, fill=tiles)) + geom_col(colour="black") + 
+  theme_minimal() + scale_fill_manual(values=cols)
+ 
+ggsave(gg1, file="../figures/modularity_neighborhood.pdf")
+```
+
